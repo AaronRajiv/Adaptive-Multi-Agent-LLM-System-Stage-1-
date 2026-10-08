@@ -32,6 +32,13 @@ class Settings(BaseSettings):
         description="Model name to be used by the active provider"
     )
 
+    # Knowledge and retrieval configuration
+    embedding_provider: str = Field(default="gemini", description="Embedding provider identifier (gemini or mock)")
+    embedding_api_key: str = Field(default="", description="Optional embedding API key; falls back to LLM_API_KEY for Gemini")
+    embedding_model: str = Field(default="gemini-embedding-001", description="Embedding model name")
+    knowledge_database_url: str = Field(default="", description="Optional PostgreSQL connection URL for the pgvector knowledge store")
+    knowledge_embedding_dimensions: int = Field(default=768, ge=1, description="Vector dimensions for the configured knowledge repository")
+
     # Agent / Pipeline configuration
     evaluator_pass_threshold: int = Field(
         default=80,

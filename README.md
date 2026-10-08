@@ -103,6 +103,25 @@ We are starting from **Stage 1 (Fixed Multi-Agent Baseline)**. Stage 1 intention
 - **Frontend**: React 19, TypeScript, Vite, Modern CSS Design System (Lucide icons)
 - **LLM Abstraction**: Generic `LLMProvider` interface decoupled from concrete implementations (`GeminiProvider`, `MockLLMProvider`)
 
+## Stage 2: Dynamic Task Graph
+
+Stage 2 introduces a planning-only task graph model in `backend/app/models/task_graph.py`.
+
+- `TaskNode` represents one unit of planned work: its ID, description, type, status, dependencies, intended capability, and optional metadata.
+- `TaskGraph` contains task nodes and validates unique IDs, task references, self-dependencies, and cycles.
+- A dependency means the dependent task may run only after the prerequisite has status `COMPLETED`.
+- `runnable_tasks()` returns tasks in `PENDING` or `READY` whose dependencies have all completed successfully.
+
+The graph deliberately does not execute tasks or mutate lifecycle states. Creating and validating a plan is separated from executing it so that the Stage 3 orchestrator can own scheduling, state transitions, retries, and failure handling without redesigning the graph model.
+
+## Stage 3: Dependency-Aware Orchestrator
+
+`backend/app/orchestration/orchestrator.py` executes a validated graph and promotes runnable tasks through `PENDING -> READY -> RUNNING -> COMPLETED`, resolves capabilities through an in-memory registry, and passes completed dependency results to the selected agent. Failed prerequisites cause dependent tasks to become `BLOCKED`.
+
+## Stage 4: Bounded Parallel Execution and Controlled Tools
+
+`Orchestrator(max_concurrency=4)` now schedules independent runnable tasks concurrently up to a configurable limit, while only admitting a dependent task after every prerequisite completes successfully. `backend/app/orchestration/tools.py` adds a separate `ToolRegistry` and schema-validated controlled tool interface; it deliberately provides no unrestricted shell, code-execution, or live web-search capability.
+
 ---
 
 ## 5. Directory Structure
@@ -290,3 +309,13 @@ To maintain a clean baseline without premature complexity, the following capabil
 - **Stage 8**: External Tools & Code Execution (Live web search, sandbox interpreters)
 - **Stage 9**: Persistent Execution State (Resumable workflows & audit trails)
 - **Stage 10**: Benchmarking (Empirical comparison: Single LLM vs Fixed Multi-Agent vs Adaptive Multi-Agent)
+
+## Stage 5: Optional RAG Knowledge Base
+
+Stage 5 adds a provider-agnostic retrieval subsystem for text documents. A `KnowledgeDocument` is chunked deterministically, embedded, and stored through a `KnowledgeRepository`. `RetrievalService` embeds a query and returns `RetrievedContext` containing scored chunks with document ID, chunk ID, source, metadata, and similarity score.
+
+Retrieval is optional: a graph task receives it only when its metadata includes `retrieval_query` (and optionally `retrieval_top_k`). The orchestrator attaches the resulting structured context to `TaskExecutionContext`; it does not perform vector-search internals and agents are not forced to use RAG.
+
+For deterministic development and tests, use `MockEmbeddingProvider` with `InMemoryKnowledgeRepository`. For persistence, `PostgresPgvectorKnowledgeRepository` targets PostgreSQL with pgvector. Configure `KNOWLEDGE_DATABASE_URL`, `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, and `KNOWLEDGE_EMBEDDING_DIMENSIONS`; create the knowledge-only schema in `backend/app/knowledge/sql/pgvector_schema.sql`, ensuring its `VECTOR(...)` dimension matches the configured embedding dimension. PostgreSQL is optional and is not required to run the backend test suite.
+
+RAG is introduced here as an evidence-retrieval capability. Its effect on answer quality will be evaluated experimentally in a later stage.

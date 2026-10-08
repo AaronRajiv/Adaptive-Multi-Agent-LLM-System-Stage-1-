@@ -6,3 +6,5 @@ python-dotenv>=1.0.1
 httpx>=0.27.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
+# Optional persistent Stage 5 knowledge repository (not required by deterministic tests)
+psycopg[binary]>=3.1.0

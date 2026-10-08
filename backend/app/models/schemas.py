@@ -5,35 +5,28 @@ Provides strict Pydantic models for agent inputs, outputs, validation,
 and API request/response contracts.
 """
 
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 from pydantic import BaseModel, Field
 
+from app.models.task_graph import TaskGraph, TaskNode
 
-class SubTask(BaseModel):
-    """Represents an atomic subtask produced by the Planner Agent."""
 
-    id: str = Field(
-        ...,
-        description="Unique task identifier, e.g., 'T1', 'T2'"
-    )
-    description: str = Field(
-        ...,
-        description="Concrete, actionable description of the subtask"
-    )
-    type: Literal["research", "analysis"] = Field(
-        default="research",
-        description="Subtask classification: 'research' for information gathering, 'analysis' for synthesis"
-    )
+# Backward-compatible Stage 1 name for graph-compatible planned work.
+SubTask = TaskNode
 
 
 class PlannerOutput(BaseModel):
     """Structured output emitted by the Planner Agent."""
 
-    tasks: List[SubTask] = Field(
+    tasks: List[TaskNode] = Field(
         ...,
         min_length=1,
         description="List of subtasks decomposing the user task"
     )
+
+    def to_task_graph(self) -> TaskGraph:
+        """Convert planner output into a validated graph without executing it."""
+        return TaskGraph(tasks=self.tasks)
 
 
 class ResearchResult(BaseModel):
@@ -73,6 +66,21 @@ class StageTrace(BaseModel):
     summary: Optional[str] = Field(default=None, description="Brief summary of output or error")
 
 
+class TaskExecutionTrace(BaseModel):
+    """Lightweight audit record for an attempted or blocked task."""
+
+    task_id: str
+    capability: str
+    agent_name: Optional[str] = None
+    started_at: str
+    ended_at: str
+    duration_ms: float
+    status: Any
+    success: bool
+    output: Any = None
+    error: Optional[str] = None
+
+
 class RunRequest(BaseModel):
     """API Request payload to execute a user task."""
 
@@ -95,6 +103,11 @@ class RunResponse(BaseModel):
     final_answer: str = Field(..., description="Final user-facing response from Synthesizer Agent")
     execution_trace: List[StageTrace] = Field(..., description="Observable trace with per-stage measured latencies")
     created_at: str = Field(..., description="ISO 8601 timestamp of execution")
+
+    # Stage 2-5 Extensions:
+    task_graph: Optional[TaskGraph] = Field(default=None, description="Executed TaskGraph with runtime statuses and dependencies")
+    retrieved_chunks: List[Any] = Field(default_factory=list, description="All retrieved knowledge chunks with provenance")
+    task_execution_traces: List[TaskExecutionTrace] = Field(default_factory=list, description="Per-task execution traces from Orchestrator")
 
 
 class SystemStatusResponse(BaseModel):

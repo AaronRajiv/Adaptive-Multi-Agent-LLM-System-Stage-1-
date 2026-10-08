@@ -1,76 +1,71 @@
-import type { RunResponse, SystemStatusResponse, ApiErrorDetail } from '../types';
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
-
+import type { RunResponse, SystemStatusResponse, ApiErrorDetail } from "../types/api";
+export const API_BASE_URL = import.meta.env["VITE_API_BASE_URL"] || "http://localhost:8000";
 export class ApiError extends Error {
-  detail: ApiErrorDetail | string;
-  statusCode: number;
-
-  constructor(message: string, statusCode: number, detail: ApiErrorDetail | string) {
+  constructor(
+    message: string,
+    public statusCode: number,
+    public detail: ApiErrorDetail | string,
+  ) {
     super(message);
-    this.name = 'ApiError';
-    this.statusCode = statusCode;
-    this.detail = detail;
+    this.name = "ApiError";
   }
 }
-
+async function request(path: string, init?: RequestInit, timeout = 120000): Promise<unknown> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    const res = await fetch(`${API_BASE_URL}${path}`, { ...init, signal: controller.signal });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      const detail = data?.detail;
+      const message =
+        typeof detail === "string"
+          ? detail
+          : detail?.message || `Request failed (HTTP ${res.status})`;
+      throw new ApiError(message, res.status, detail || message);
+    }
+    if (data === null)
+      throw new ApiError(
+        "The backend returned an empty or invalid response.",
+        res.status,
+        "Invalid response",
+      );
+    return data;
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    const message =
+      error instanceof Error && error.name === "AbortError"
+        ? "The request timed out. The backend may still be processing this task."
+        : "Backend unavailable. Verify the API server and connection settings.";
+    throw new ApiError(message, 0, message);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 export async function fetchSystemStatus(): Promise<SystemStatusResponse> {
   try {
-    const res = await fetch(`${API_BASE_URL}/api/status`);
-    if (!res.ok) {
-      throw new Error(`Status check failed: HTTP ${res.status}`);
-    }
-    return await res.json();
-  } catch (err: unknown) {
+    return (await request("/api/status", undefined, 8000)) as SystemStatusResponse;
+  } catch (error) {
     return {
       configured: false,
-      provider: 'unknown',
-      model: 'unknown',
+      provider: "unknown",
+      model: "unknown",
       evaluator_threshold: 80,
-      message: err instanceof Error ? `Cannot reach backend at ${API_BASE_URL}: ${err.message}` : 'Backend is unreachable',
+      message: error instanceof Error ? error.message : "Backend unavailable",
     };
   }
 }
-
 export async function executePipeline(task: string): Promise<RunResponse> {
-  let res: Response;
-  try {
-    res = await fetch(`${API_BASE_URL}/api/run`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ task }),
-    });
-  } catch (networkErr: unknown) {
-    throw new ApiError(
-      networkErr instanceof Error ? networkErr.message : 'Network communication failed',
-      0,
-      'Backend is unreachable. Please verify the FastAPI server is running on port 8000.'
-    );
-  }
-
-  const data = await res.json();
-
-  if (!res.ok) {
-    const detail = data?.detail;
-    let message = `Pipeline execution failed (HTTP ${res.status})`;
-    if (typeof detail === 'string') {
-      message = detail;
-    } else if (detail?.message) {
-      message = detail.message;
-    }
-    throw new ApiError(message, res.status, detail);
-  }
-
-  return data as RunResponse;
+  return (await request("/api/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task }),
+  })) as RunResponse;
 }
-
 export async function fetchRecentRuns(): Promise<RunResponse[]> {
   try {
-    const res = await fetch(`${API_BASE_URL}/api/runs`);
-    if (!res.ok) return [];
-    return await res.json();
+    const data = await request("/api/runs", undefined, 8000);
+    return Array.isArray(data) ? data : [];
   } catch {
     return [];
   }

@@ -1,32 +1,33 @@
-# React + TypeScript + Vite
+# Adaptive Canvas
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Build a complete frontend redesign for the Adaptive Multi-Agent LLM System as detailed in the attached specifications (Build a complete frontend redesign for this (pasted).txt) with index.ts types and api.ts client.
 
-Currently, two official plugins are available:
+Key requirements:
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+1. Strict 100vw x 100dvh single viewport layout (no page scrolling) with dark theme (#090d14) and glass translucent surfaces.
+2. Tier 1 Top Bar (~48px): System title, subtitle, live status from GET /api/status (● SYSTEM ONLINE), demo task presets, Architecture/Live Execution toggle, Clear Canvas.
+3. Tier 2 Task Command Bar (~52px): Glass input ("Enter complex analytical task..."), Run Pipeline button (⌘+Enter).
+4. Tier 3 Upper Canvas: Interactive React Flow (@xyflow/react) task graph with custom nodes (TaskNode with status badges, specialized RAG Node with query/provenance, Evaluator Node with amber score ring, Synthesis Node), animated dependency edges, minimap, zoom and fit controls.
+5. Tier 3 Lower Console (~200px): Split 45% Live Event Stream & Telemetry and 55% Inspector with tabs (Final Synthesis markdown view, Node Inspector, RAG Provenance).
+6. Preserves real backend integration via VITE_API_BASE_URL (fallback http://localhost:8000) using /api/status, /api/run, and /api/runs with adapter layer, handling error states and graceful offline fallback.
 
-## React Compiler
+This project was built with [Lovable](https://lovable.dev).
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Build with Lovable
 
-## Expanding the Oxlint configuration
+Continue developing this project in the [Lovable editor](https://lovable.dev/projects/3c3830dc-73f2-435f-ba2c-057bd890eb6c).
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+- **Ship faster**: describe what you want to build and Lovable handles the code.
+- **Stay in sync**: every change made in Lovable is committed straight to this repository.
+- **Full ownership**: this code is yours. Push to `main` on GitHub and your changes sync back into Lovable, ready for your next prompt.
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+## Development
+
+Prefer working locally? You need Node.js and npm — [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating).
+
+```sh
+git clone <this-repository-url>
+cd <repository-name>
+npm i
+npm run dev
 ```
-
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.

@@ -5,15 +5,17 @@ Responsible for synthesizing all collected research results with the original us
 comparing dimensions, evaluating trade-offs, and producing a structured analytical report.
 """
 
-from typing import List
+from typing import List, Optional
+
+from app.knowledge.models import RetrievedContext
 from app.llm.base import LLMProvider
 from app.models.schemas import ResearchResult
 
-ANALYST_SYSTEM_PROMPT = """You are the ANALYST AGENT in a baseline multi-agent system.
-Your responsibility is deep synthesis, logical reasoning, and cross-comparison of research findings.
+ANALYST_SYSTEM_PROMPT = """You are the ANALYST AGENT in a multi-agent system.
+Your responsibility is deep synthesis, logical reasoning, and cross-comparison of research findings and grounding evidence.
 
 Rules:
-1. Review the original user task and all provided research findings from the Research Agents.
+1. Review the original user task, all provided research findings, and any retrieved grounding evidence.
 2. DO NOT simply copy-paste research points.
 3. Compare perspectives, identify trade-offs, evaluate nuances, and highlight logical implications.
 4. Produce a rigorous, structured analytical assessment with clear headers and bullet points.
@@ -30,13 +32,19 @@ class AnalystAgent:
     def __init__(self, llm_provider: LLMProvider):
         self.llm = llm_provider
 
-    async def analyze(self, user_task: str, research_results: List[ResearchResult]) -> str:
+    async def analyze(
+        self,
+        user_task: str,
+        research_results: List[ResearchResult],
+        retrieved_context: Optional[RetrievedContext] = None,
+    ) -> str:
         """
         Synthesize research findings into a comprehensive analytical report.
 
         Args:
             user_task: The original user task.
             research_results: List of ResearchResult objects from the Research Agents.
+            retrieved_context: Optional structured RAG context retrieved for this task.
 
         Returns:
             A coherent, well-reasoned analytical report string.
@@ -46,10 +54,19 @@ class AnalystAgent:
             for res in research_results
         )
 
+        grounding_section = ""
+        if retrieved_context and retrieved_context.chunks:
+            chunk_texts = "\n\n".join(
+                f"[Source: {c.source} | Doc: {c.document_id} | Chunk #{c.chunk_index} (Score: {c.similarity_score:.2f})]:\n{c.content}"
+                for c in retrieved_context.chunks
+            )
+            grounding_section = f"\n\nRetrieved Grounding Evidence:\n{chunk_texts}\n"
+
         prompt = (
             f"Original User Task:\n\"{user_task.strip()}\"\n\n"
             f"Collected Research Findings from Subtasks:\n"
-            f"{research_context}\n\n"
+            f"{research_context}"
+            f"{grounding_section}\n\n"
             f"Based on the above findings, generate a thorough, cohesive analytical synthesis "
             f"evaluating the primary dimensions, trade-offs, and strategic conclusions."
         )

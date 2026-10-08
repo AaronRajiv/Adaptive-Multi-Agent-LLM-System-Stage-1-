@@ -17,11 +17,8 @@ from app.models.schemas import (
     RunResponse,
     SystemStatusResponse,
 )
-from app.pipeline.baseline_pipeline import (
-    BaselinePipeline,
-    get_recent_runs,
-    record_run,
-)
+from app.pipeline.orchestrated_pipeline import OrchestratedPipeline
+from app.pipeline.baseline_pipeline import get_recent_runs
 
 router = APIRouter(prefix="/api", tags=["Multi-Agent Pipeline"])
 
@@ -56,10 +53,10 @@ async def get_system_status() -> SystemStatusResponse:
 @router.post("/run", response_model=RunResponse)
 async def run_pipeline(request: RunRequest) -> RunResponse:
     """
-    Execute the Stage 1 Fixed Baseline Multi-Agent Pipeline.
+    Execute the Orchestrated Multi-Agent Pipeline.
 
-    Sequential steps:
-    Planner -> Research -> Analyst -> Evaluator -> Synthesizer -> Final Answer
+    Orchestrated steps:
+    Planner -> TaskGraph -> Orchestrator (Parallel + Capabilities + RAG) -> Evaluator -> Synthesizer
     """
     task_text = request.task.strip()
     if len(task_text) < 3:
@@ -81,12 +78,11 @@ async def run_pipeline(request: RunRequest) -> RunResponse:
             },
         )
 
-    # 2. Run Baseline Pipeline
-    pipeline = BaselinePipeline(llm_provider=provider, settings=settings)
+    # 2. Run Orchestrated Pipeline (Stage 2-5 Graph + Orchestrator)
+    pipeline = OrchestratedPipeline(llm_provider=provider, settings=settings)
 
     try:
         result = await pipeline.execute(task_text)
-        record_run(result)
         return result
     except LLMStructuredOutputError as e:
         raise HTTPException(

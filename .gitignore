@@ -47,3 +47,7 @@ frontend/.dist/
 .vscode/
 *.swp
 *.swo
+
+# Backups & archives
+frontend_backup_*/
+frontend.zip
