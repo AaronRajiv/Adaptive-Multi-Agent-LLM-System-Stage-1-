@@ -1,7 +1,7 @@
-# Adaptive Multi-Agent LLM System for Task Decomposition and Collaborative Problem Solving (early)
+# Adaptive Multi-Agent LLM System for Task Decomposition and Collaborative Problem Solving
 
 **Final Year Computer Science & Engineering Major Project**  
-*Current Milestone: Stage 1 — Fixed Multi-Agent Baseline Prototype*
+*Current Milestone: Stages 1–5 — Orchestrated Multi-Agent Pipeline with RAG*
 
 ---
 
@@ -9,18 +9,15 @@
 
 The objective of this engineering major project is to build an adaptive, orchestrator-driven multi-agent LLM system capable of taking high-level, complex analytical tasks, decomposing them into discrete subtasks, routing them to specialized agents, evaluating intermediate outputs, and dynamically adapting execution plans when results fall short of quality benchmarks.
 
-### Stage 1 Scope: Fixed Baseline Pipeline
+### Current Implementation: Stages 1–5
 
-We are starting from **Stage 1 (Fixed Multi-Agent Baseline)**. Stage 1 intentionally establishes the foundational multi-agent communication pipeline, provider-agnostic LLM abstraction, role separation, structured task decomposition, and observability telemetry before any dynamic or adaptive complexities are introduced.
+The system implements a dynamic, dependency-aware orchestrated pipeline:
 
-> [!IMPORTANT]
-> **Stage 1 is a FIXED MULTI-AGENT BASELINE.**
-> It intentionally executes a deterministic, sequential pipeline:
-> $$\text{User Task} \longrightarrow \text{Planner} \longrightarrow \text{Subtasks} \longrightarrow \text{Research Agents} \longrightarrow \text{Analyst} \longrightarrow \text{Evaluator} \longrightarrow \text{Synthesizer} \longrightarrow \text{Final Answer}$$
+$$\text{User Task} \longrightarrow \text{Planner (TaskGraph)} \longrightarrow \text{Orchestrator (Parallel + Capabilities + RAG)} \longrightarrow \text{Evaluator} \longrightarrow \text{Synthesizer} \longrightarrow \text{Final Answer}$$
 
 ---
 
-## 2. Stage 1 Conceptual Architecture
+## 2. Architecture
 
 ```
                                   +---------------------------------------+
@@ -29,9 +26,10 @@ We are starting from **Stage 1 (Fixed Multi-Agent Baseline)**. Stage 1 intention
                                                       |
                                                       v
                                   +---------------------------------------+
-                                  |         REACT FRONTEND (Vite)         |
+                                  |   REACT FRONTEND (TanStack + Vite)    |
+                                  |   Execution Graph · Control Plane     |
                                   +---------------------------------------+
-                                                      |  HTTP POST /api/run
+                                                      |  HTTP /api/run, /api/status
                                                       v
                                   +---------------------------------------+
                                   |       FASTAPI BACKEND & ROUTER        |
@@ -39,149 +37,77 @@ We are starting from **Stage 1 (Fixed Multi-Agent Baseline)**. Stage 1 intention
                                                       |
                                                       v
                                   +---------------------------------------+
-                                  |       BASELINE PIPELINE COORDINATOR   |
+                                  |     ORCHESTRATED PIPELINE (Stage 2-5) |
                                   +---------------------------------------+
                                                       |
-                                                      v
-                                  +---------------------------------------+
-                                  |            PLANNER AGENT              |
-                                  |  - Decomposes task into typed subtasks|
-                                  +---------------------------------------+
-                                                      |  Subtasks [T1, T2, ...]
-                                                      v
-                                  +---------------------------------------+
-                                  |          RESEARCH AGENT(S)            |
-                                  |  - Parametric LLM knowledge retrieval |
-                                  +---------------------------------------+
-                                                      |  Research Findings
-                                                      v
-                                  +---------------------------------------+
-                                  |            ANALYST AGENT              |
-                                  |  - Synthesis, trade-offs & reasoning  |
-                                  +---------------------------------------+
-                                                      |  Analytical Report
-                                                      v
-                                  +---------------------------------------+
-                                  |           EVALUATOR AGENT             |
-                                  |  - Scores output (0-100), PASS/FAIL   |
-                                  +---------------------------------------+
-                                                      |  Score & Feedback
-                                                      v
-                                  +---------------------------------------+
-                                  |          SYNTHESIZER AGENT            |
-                                  |  - Produces final user-facing answer  |
-                                  +---------------------------------------+
-                                                      |
-                                                      v
-                                  +---------------------------------------+
-                                  |   FINAL ANSWER & OBSERVABLE TRACE     |
-                                  +---------------------------------------+
+                          +---------------------------+---------------------------+
+                          |                           |                           |
+                          v                           v                           v
+                  +----------------+        +------------------+        +------------------+
+                  | PLANNER AGENT  |        | CAPABILITY       |        | RAG / KNOWLEDGE  |
+                  | TaskGraph DAG  |        | REGISTRY         |        | (Stage 5)        |
+                  | (Stage 2)      |        | (Stage 3-4)      |        | Embeddings +     |
+                  +----------------+        +------------------+        | Retrieval        |
+                          |                    |            |           +------------------+
+                          v                    v            v
+                  +----------------+   +-----------+  +-----------+
+                  | ORCHESTRATOR   |   | RESEARCH  |  | ANALYSIS  |
+                  | Parallel DAG   |   | AGENT     |  | AGENT     |
+                  | Execution      |   +-----------+  +-----------+
+                  | (Stage 4)      |
+                  +----------------+
+                          |
+                          v
+                  +---------------------------------------+
+                  |           EVALUATOR AGENT             |
+                  |  Scores output (0-100), PASS/FAIL     |
+                  +---------------------------------------+
+                          |
+                          v
+                  +---------------------------------------+
+                  |          SYNTHESIZER AGENT            |
+                  |  Produces final user-facing answer    |
+                  +---------------------------------------+
+                          |
+                          v
+                  +---------------------------------------+
+                  |   FINAL ANSWER & OBSERVABLE TRACE     |
+                  +---------------------------------------+
 ```
 
 ---
 
-## 3. Agent Responsibilities & Pipeline Workflow
+## 3. Implemented Stages
+
+| Stage | Component | Description |
+| :--- | :--- | :--- |
+| **Stage 1** | Planner Agent | Dynamic task decomposition into typed subtasks with dependency graph |
+| **Stage 2** | TaskGraph Model | DAG-based task modeling with validation (cycles, self-deps, unique IDs) |
+| **Stage 3** | Orchestrator + Capability Registry | Dependency-aware execution with capability-based agent routing |
+| **Stage 4** | Bounded Parallel Execution | Concurrent task execution up to configurable limit (`max_concurrency=4`) |
+| **Stage 5** | RAG Knowledge Retrieval | Embedding-based retrieval with in-memory or pgvector repository |
+
+---
+
+## 4. Agent Responsibilities
 
 | Agent | Responsibility | Input | Output |
 | :--- | :--- | :--- | :--- |
-| **Planner Agent** | Task Decomposition into discrete subtasks. | User Task Prompt | Validated `PlannerOutput` (`SubTask` list with `id`, `description`, `type`) |
-| **Research Agent** | Targeted factual investigation per subtask. | User Context + Single `SubTask` | `ResearchResult` (Parametric knowledge findings) |
-| **Analyst Agent** | Multi-dimensional synthesis and trade-off analysis. | User Task + All Research Findings | Structured Analytical Synthesis Report |
-| **Evaluator Agent** | Quality audit on Correctness, Completeness, Relevance, and Clarity. | User Task + Analyst Output | `EvaluationResult` (`score`, `status`: PASS/FAIL, `feedback`) |
-| **Synthesizer Agent** | Generates the final, authoritative user-facing response. | Task + Research + Analysis + Evaluation | Final Polished Answer presented in UI |
-
-> [!NOTE]
-> **Clarification regarding the Research Agent:**  
-> Stage 1 operates purely on the LLM's **parametric knowledge**. There is NO live web search, web scraping, document retrieval, or RAG in Stage 1. Retrieval-Augmented Generation and external tools will be integrated in subsequent stages.
+| **Planner Agent** | Task Decomposition into a dependency-aware TaskGraph | User Task Prompt | `PlannerOutput` → `TaskGraph` |
+| **Research Agent** | Targeted factual investigation per subtask | User Context + Single `TaskNode` | `ResearchResult` |
+| **Analyst Agent** | Multi-dimensional synthesis and trade-off analysis | User Task + All Research Findings | Analytical Synthesis Report |
+| **Evaluator Agent** | Quality audit on Correctness, Completeness, Relevance, and Clarity | User Task + Analyst Output | `EvaluationResult` (score 0-100, PASS/FAIL) |
+| **Synthesizer Agent** | Generates the final, authoritative user-facing response | Task + Research + Analysis + Evaluation | Final Polished Answer |
 
 ---
 
-## 4. Technology Stack
+## 5. Technology Stack
 
 - **Backend**: Python 3.10+, FastAPI, Pydantic v2, Pydantic-Settings, Uvicorn, HTTPX
 - **Testing**: Pytest, Pytest-Asyncio
-- **Frontend**: React 19, TypeScript, Vite, Modern CSS Design System (Lucide icons)
-- **LLM Abstraction**: Generic `LLMProvider` interface decoupled from concrete implementations (`GeminiProvider`, `MockLLMProvider`)
-
-## Stage 2: Dynamic Task Graph
-
-Stage 2 introduces a planning-only task graph model in `backend/app/models/task_graph.py`.
-
-- `TaskNode` represents one unit of planned work: its ID, description, type, status, dependencies, intended capability, and optional metadata.
-- `TaskGraph` contains task nodes and validates unique IDs, task references, self-dependencies, and cycles.
-- A dependency means the dependent task may run only after the prerequisite has status `COMPLETED`.
-- `runnable_tasks()` returns tasks in `PENDING` or `READY` whose dependencies have all completed successfully.
-
-The graph deliberately does not execute tasks or mutate lifecycle states. Creating and validating a plan is separated from executing it so that the Stage 3 orchestrator can own scheduling, state transitions, retries, and failure handling without redesigning the graph model.
-
-## Stage 3: Dependency-Aware Orchestrator
-
-`backend/app/orchestration/orchestrator.py` executes a validated graph and promotes runnable tasks through `PENDING -> READY -> RUNNING -> COMPLETED`, resolves capabilities through an in-memory registry, and passes completed dependency results to the selected agent. Failed prerequisites cause dependent tasks to become `BLOCKED`.
-
-## Stage 4: Bounded Parallel Execution and Controlled Tools
-
-`Orchestrator(max_concurrency=4)` now schedules independent runnable tasks concurrently up to a configurable limit, while only admitting a dependent task after every prerequisite completes successfully. `backend/app/orchestration/tools.py` adds a separate `ToolRegistry` and schema-validated controlled tool interface; it deliberately provides no unrestricted shell, code-execution, or live web-search capability.
-
----
-
-## 5. Directory Structure
-
-```
-Multi-agent LLM System/
-├── backend/
-│   ├── app/
-│   │   ├── main.py                     # FastAPI application entrypoint & CORS
-│   │   ├── config.py                   # Pydantic Settings & environment loader
-│   │   ├── api/
-│   │   │   └── routes.py               # REST endpoints (/api/run, /api/status, /api/runs)
-│   │   ├── models/
-│   │   │   └── schemas.py              # Pydantic models for tasks, agents & telemetry
-│   │   ├── llm/
-│   │   │   ├── base.py                 # Abstract LLMProvider interface & custom errors
-│   │   │   └── provider.py             # GeminiProvider & MockLLMProvider implementations
-│   │   ├── agents/
-│   │   │   ├── planner.py              # Task decomposition agent
-│   │   │   ├── researcher.py           # Parametric knowledge research agent
-│   │   │   ├── analyst.py              # Synthesis & reasoning agent
-│   │   │   ├── evaluator.py            # Quality audit & scoring agent
-│   │   │   └── synthesizer.py          # Final user response synthesizer
-│   │   └── pipeline/
-│   │       └── baseline_pipeline.py    # Fixed sequential coordinator & trace recorder
-│   ├── tests/
-│   │   ├── test_schemas.py             # Schema validation tests
-│   │   ├── test_pipeline.py            # Pipeline mock integration tests
-│   │   ├── test_api.py                 # FastAPI route tests
-│   │   └── test_error_handling.py      # Missing key and validation error tests
-│   ├── requirements.txt                # Python dependencies
-│   └── .env.example                    # Template environment variables
-│
-├── frontend/
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── Header.tsx              # Application header & provider status pill
-│   │   │   ├── ConfigBanner.tsx        # Missing credentials / setup guidance alert
-│   │   │   ├── TaskInput.tsx           # Task input textarea & demo prompt presets
-│   │   │   ├── PipelineTimeline.tsx    # Stage-by-stage latency & status timeline
-│   │   │   ├── SubtaskView.tsx         # Decomposed subtask card viewer
-│   │   │   ├── ResearchView.tsx        # Parametric research findings accordion
-│   │   │   ├── AnalystView.tsx         # Analytical synthesis card
-│   │   │   ├── EvaluatorView.tsx       # Evaluator score badge (0-100) & critique
-│   │   │   ├── FinalAnswerView.tsx     # Final answer viewer with copy function
-│   │   │   └── ExecutionTraceLog.tsx   # Detailed latency and telemetry log table
-│   │   ├── services/
-│   │   │   └── api.ts                  # Backend API client
-│   │   ├── types/
-│   │   │   └── index.ts                # TypeScript data interfaces
-│   │   ├── App.tsx                     # Main layout & tabbed execution trace manager
-│   │   ├── index.css                   # Custom modern dark design system
-│   │   └── main.tsx                    # React mounting entrypoint
-│   ├── package.json
-│   ├── tsconfig.json
-│   └── vite.config.ts
-│
-├── .gitignore
-└── README.md
-```
+- **Frontend**: React 19, TypeScript, TanStack Router, TanStack Start, React Flow (@xyflow/react), Tailwind CSS v4, shadcn/ui, Vite 8
+- **LLM Abstraction**: Generic `LLMProvider` interface (`GeminiProvider`, `MockLLMProvider`)
+- **Knowledge/RAG**: Embedding providers (Gemini, Mock), In-memory or PostgreSQL+pgvector repository
 
 ---
 
@@ -193,7 +119,7 @@ Multi-agent LLM System/
 
 ### Backend Setup
 
-1. Open terminal and navigate to `backend/`:
+1. Navigate to `backend/`:
    ```bash
    cd backend
    ```
@@ -213,27 +139,27 @@ Multi-agent LLM System/
    ```bash
    cp .env.example .env
    ```
-   *Edit `backend/.env` to configure your settings:*
+   Edit `backend/.env` to add your API key:
    ```env
    LLM_PROVIDER=gemini
    LLM_API_KEY=your_gemini_api_key_here
-   LLM_MODEL=gemini-1.5-flash
+   LLM_MODEL=gemini-3.1-flash-lite
    EVALUATOR_PASS_THRESHOLD=80
-   CORS_ORIGINS=http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173
+   CORS_ORIGINS=http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173,http://localhost:8082
    ```
-   *(For offline development or testing without an API key, set `LLM_PROVIDER=mock`)*
+   > **Tip:** For offline development or testing without an API key, set `LLM_PROVIDER=mock`.
 
 5. Start the FastAPI backend server:
    ```bash
-   uvicorn app.main:app --reload --port 8000
+   uvicorn app.main:app --host 0.0.0.0 --port 8000
    ```
-   *The backend API documentation is available at `http://localhost:8000/docs`.*
+   The API docs are available at `http://localhost:8000/docs`.
 
 ---
 
 ### Frontend Setup
 
-1. Open a new terminal and navigate to `frontend/`:
+1. Navigate to `frontend/`:
    ```bash
    cd frontend
    ```
@@ -247,75 +173,137 @@ Multi-agent LLM System/
    ```bash
    npm run dev
    ```
-   *Open `http://localhost:5173` in your browser.*
+   Open **`http://localhost:8082`** in your browser.
+
+> [!IMPORTANT]
+> The frontend dev server runs on **port 8082** (configured by `@lovable.dev/vite-tanstack-config`).
+> Make sure `CORS_ORIGINS` in your backend `.env` includes `http://localhost:8082`.
 
 ---
 
-## 7. Automated Testing
+## 7. API Endpoints
 
-All automated tests use `MockLLMProvider` and do not require live API credentials:
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/api/status` | System configuration status and LLM provider readiness |
+| `POST` | `/api/run` | Execute the orchestrated multi-agent pipeline |
+| `GET` | `/api/runs` | Retrieve recent execution traces (in-memory) |
+| `GET` | `/docs` | Interactive Swagger API documentation |
+
+---
+
+## 8. Automated Testing
+
+All tests use `MockLLMProvider` and do **not** require live API credentials:
 
 ```bash
 cd backend
 ./venv/bin/pytest -v
 ```
 
-**Test Coverage Includes:**
-- Pydantic schema validation (`SubTask`, `PlannerOutput`, `EvaluationResult`, `RunRequest`)
-- Full fixed pipeline execution end-to-end with measured stage latencies
-- API endpoints (`GET /api/status`, `POST /api/run`, `GET /api/runs`, `GET /`)
-- Error handling (missing API key 503 response, invalid input length 422, unconfigured providers)
+**Backend test coverage:**
+- Pipeline end-to-end execution with orchestrated graph
+- TaskGraph validation (cycles, dependencies, unique IDs)
+- Orchestrator concurrency and capability routing
+- Knowledge retrieval and embedding
+- API endpoints and error handling
+
+```bash
+cd frontend
+npm test
+```
+
+**Frontend test coverage:**
+- API adapter transforms
+- App routing
+- Console presentation
 
 ---
 
-## 8. Example Demonstration Tasks
+## 9. Directory Structure
 
-The system includes pre-configured demo presets:
-
-1. **Electric vs Petrol Vehicle Comparison:**
-   > *"Compare electric vehicles and petrol vehicles for a college student considering cost, maintenance, environmental impact and practicality."*
-
-2. **Renewable Energy Investment (India):**
-   > *"Analyze whether India should increase investment in renewable energy considering economic, environmental and policy factors."*
-
----
-
-## 9. What is Intentionally NOT Implemented in Stage 1
-
-To maintain a clean baseline without premature complexity, the following capabilities are **explicitly deferred** to subsequent project stages:
-
-- **Dynamic Routing & Agent Selection** (Stage 4)
-- **Task Graph & Dependency Management** (Stage 3)
-- **Dynamic Orchestration Engine** (Stage 2)
-- **Parallel Subtask Execution** (Stage 5)
-- **Evaluation-Driven Replanning Loops** (Stage 6)
-- **Retrieval-Augmented Generation / Vector Databases** (Stage 7)
-- **Live Search & External Tools** (Stage 8)
-- **Persistent Database State (PostgreSQL / Redis / MongoDB)** (Stage 9)
-- **Empirical Benchmarking Suite** (Stage 10)
-- **Framework abstractions (LangChain, LangGraph, CrewAI)** (Intentionally avoided in favor of native, extensible modular design)
+```
+Multi-agent LLM System/
+├── backend/
+│   ├── app/
+│   │   ├── main.py                          # FastAPI entrypoint & CORS
+│   │   ├── config.py                        # Pydantic Settings & env loader
+│   │   ├── api/
+│   │   │   └── routes.py                    # REST endpoints (/api/run, /api/status, /api/runs)
+│   │   ├── models/
+│   │   │   ├── schemas.py                   # Pydantic models for tasks, agents & telemetry
+│   │   │   └── task_graph.py                # TaskNode, TaskGraph DAG model (Stage 2)
+│   │   ├── llm/
+│   │   │   ├── base.py                      # Abstract LLMProvider interface & errors
+│   │   │   └── provider.py                  # GeminiProvider & MockLLMProvider
+│   │   ├── agents/
+│   │   │   ├── planner.py                   # Task decomposition agent
+│   │   │   ├── researcher.py                # Parametric research agent
+│   │   │   ├── analyst.py                   # Synthesis & reasoning agent
+│   │   │   ├── evaluator.py                 # Quality audit & scoring agent
+│   │   │   └── synthesizer.py               # Final response synthesizer
+│   │   ├── orchestration/
+│   │   │   ├── orchestrator.py              # DAG executor with parallel concurrency (Stage 3-4)
+│   │   │   ├── agents.py                    # CapabilityRegistry & task agents
+│   │   │   └── tools.py                     # Controlled tool registry (Stage 4)
+│   │   ├── knowledge/
+│   │   │   ├── embeddings.py                # Embedding providers (Gemini, Mock)
+│   │   │   ├── retrieval.py                 # RetrievalService (Stage 5)
+│   │   │   ├── repository.py                # InMemory & Postgres pgvector repos
+│   │   │   ├── chunking.py                  # Document chunking
+│   │   │   ├── ingestion.py                 # Document ingestion
+│   │   │   ├── models.py                    # Knowledge data models
+│   │   │   └── sql/pgvector_schema.sql      # Optional PostgreSQL schema
+│   │   └── pipeline/
+│   │       ├── orchestrated_pipeline.py      # Stage 2-5 orchestrated coordinator
+│   │       └── baseline_pipeline.py          # Run history recorder
+│   ├── tests/                                # Pytest test suite
+│   ├── requirements.txt
+│   └── .env.example
+│
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── execution/ExecutionConsole.tsx # Pipeline execution console
+│   │   │   ├── graph/ExecutionGraph.tsx       # React Flow DAG visualization
+│   │   │   ├── graph/TaskNode.tsx             # Graph task node component
+│   │   │   ├── layout/ControlPlane.tsx        # Main control plane UI
+│   │   │   └── ui/                            # shadcn/ui component library
+│   │   ├── services/
+│   │   │   ├── api.ts                         # Backend API client
+│   │   │   ├── adapters.ts                    # Response adapters
+│   │   │   └── executionEvents.ts             # Execution event system
+│   │   ├── types/
+│   │   │   ├── api.ts                         # TypeScript API interfaces
+│   │   │   └── execution.ts                   # Execution type definitions
+│   │   ├── routes/                            # TanStack Router pages
+│   │   ├── hooks/                             # React hooks
+│   │   ├── router.tsx                         # Router configuration
+│   │   └── styles.css                         # Tailwind CSS styles
+│   ├── package.json
+│   ├── vite.config.ts
+│   └── vitest.config.ts
+│
+├── .gitignore
+└── README.md
+```
 
 ---
 
 ## 10. Roadmap: Planned Evolution
 
-- **Stage 1**: Fixed Baseline Pipeline *(Current)*
-- **Stage 2**: Orchestrator (Central state machine replacing fixed sequential scripts)
-- **Stage 3**: Task Graph & Dependency Resolution (DAG-based subtask modeling)
-- **Stage 4**: Dynamic Agent Selection (Contextual agent registry & assignment)
-- **Stage 5**: Parallel Execution (Asynchronous concurrency for independent subtasks)
-- **Stage 6**: Evaluation-Driven Replanning (Automated feedback loops and dynamic repair)
-- **Stage 7**: RAG Integration (Vector embeddings and grounded knowledge retrieval)
-- **Stage 8**: External Tools & Code Execution (Live web search, sandbox interpreters)
-- **Stage 9**: Persistent Execution State (Resumable workflows & audit trails)
-- **Stage 10**: Benchmarking (Empirical comparison: Single LLM vs Fixed Multi-Agent vs Adaptive Multi-Agent)
+- **Stage 1**: Fixed Baseline Pipeline ✅
+- **Stage 2**: Dynamic Task Graph (DAG-based subtask modeling) ✅
+- **Stage 3**: Dependency-Aware Orchestrator (Capability registry & routing) ✅
+- **Stage 4**: Bounded Parallel Execution (Async concurrency for independent tasks) ✅
+- **Stage 5**: RAG Knowledge Retrieval (Embedding-based grounded context) ✅
+- **Stage 6**: Evaluation-Driven Replanning (Automated feedback loops)
+- **Stage 7**: External Tools & Code Execution (Live web search, sandboxed interpreters)
+- **Stage 8**: Persistent Execution State (Resumable workflows & audit trails)
+- **Stage 9**: Benchmarking (Single LLM vs Fixed Multi-Agent vs Adaptive Multi-Agent)
 
-## Stage 5: Optional RAG Knowledge Base
+---
 
-Stage 5 adds a provider-agnostic retrieval subsystem for text documents. A `KnowledgeDocument` is chunked deterministically, embedded, and stored through a `KnowledgeRepository`. `RetrievalService` embeds a query and returns `RetrievedContext` containing scored chunks with document ID, chunk ID, source, metadata, and similarity score.
+## 11. License
 
-Retrieval is optional: a graph task receives it only when its metadata includes `retrieval_query` (and optionally `retrieval_top_k`). The orchestrator attaches the resulting structured context to `TaskExecutionContext`; it does not perform vector-search internals and agents are not forced to use RAG.
-
-For deterministic development and tests, use `MockEmbeddingProvider` with `InMemoryKnowledgeRepository`. For persistence, `PostgresPgvectorKnowledgeRepository` targets PostgreSQL with pgvector. Configure `KNOWLEDGE_DATABASE_URL`, `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, and `KNOWLEDGE_EMBEDDING_DIMENSIONS`; create the knowledge-only schema in `backend/app/knowledge/sql/pgvector_schema.sql`, ensuring its `VECTOR(...)` dimension matches the configured embedding dimension. PostgreSQL is optional and is not required to run the backend test suite.
-
-RAG is introduced here as an evidence-retrieval capability. Its effect on answer quality will be evaluated experimentally in a later stage.
+This project is developed as part of a Final Year Engineering Major Project.
