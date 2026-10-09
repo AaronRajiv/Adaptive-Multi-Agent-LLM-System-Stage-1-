@@ -186,27 +186,39 @@ class Orchestrator:
         """Retrieve structured context only when the task explicitly requests it, filtered to document_ids if provided."""
         metadata = task.metadata or {}
         query = metadata.get("retrieval_query")
-        if query is None or not str(query).strip():
+        queries = metadata.get("retrieval_queries")
+
+        if not queries and (query is None or not str(query).strip()):
             return None
         if self.retrieval_service is None:
             raise RuntimeError(
-                f"Task '{task.id}' requested retrieval for query '{query}', but retrieval service is not available."
+                f"Task '{task.id}' requested retrieval, but retrieval service is not available."
             )
-        top_k = metadata.get("retrieval_top_k", 3)
+
+        top_k = metadata.get("retrieval_top_k", 10)
         if not isinstance(top_k, int):
             raise ValueError("retrieval_top_k must be an integer.")
 
+        budget = metadata.get("retrieval_budget")
         document_ids = metadata.get("document_ids") or (
             input_context.get("document_ids") if input_context else None
         )
 
+        display_query = str(query) if query else " | ".join(str(q) for q in queries)
         await self._emit_task_event(
             ExecutionEventType.RAG_STARTED, task,
-            message=f"Retrieving context for task '{task.id}': {query}",
+            message=f"Retrieving context for task '{task.id}': {display_query}",
         )
-        result = await self.retrieval_service.retrieve(
-            str(query), top_k=top_k, document_ids=document_ids
-        )
+
+        if queries and isinstance(queries, list):
+            result = await self.retrieval_service.retrieve_multi(
+                [str(q) for q in queries], top_k=top_k, document_ids=document_ids, budget=budget
+            )
+        else:
+            result = await self.retrieval_service.retrieve(
+                str(query), top_k=top_k, document_ids=document_ids
+            )
+
         await self._emit_task_event(
             ExecutionEventType.RAG_COMPLETED, task,
             message=f"Retrieved {len(result.chunks)} chunk(s) for task '{task.id}'.",

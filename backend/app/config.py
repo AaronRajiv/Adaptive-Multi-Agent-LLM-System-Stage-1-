@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     knowledge_chunk_overlap: int = Field(default=120, ge=0, description="Overlap in characters between consecutive chunks")
     embedding_batch_size: int = Field(default=64, ge=1, le=100, description="Batch size for embedding API calls")
     embedding_max_concurrency: int = Field(default=5, ge=1, le=20, description="Max concurrent batches for embedding generation")
+    retrieval_top_k: int = Field(default=10, ge=1, le=50, description="Default number of top chunks returned by hybrid retrieval")
+    retrieval_budget_per_run: int = Field(default=30, ge=1, description="Maximum total retrieved chunks budget per execution run")
+    retrieval_rrf_k: int = Field(default=60, ge=1, description="Reciprocal Rank Fusion smoothing parameter k")
 
     # Agent / Pipeline configuration
     evaluator_pass_threshold: int = Field(

@@ -39,6 +39,14 @@ class RetrievedChunk(DocumentChunk):
     """A retrieved chunk with similarity score and complete provenance."""
 
     similarity_score: float
+    retrieval_method: str = Field(
+        default="dense",
+        description="Method used to retrieve chunk: 'hybrid_rrf', 'dense', 'bm25', or 'direct_article_lookup'",
+    )
+    score: float | None = Field(
+        default=None,
+        description="Fused rank score or raw retrieval score",
+    )
 
 
 class RetrievedContext(BaseModel):

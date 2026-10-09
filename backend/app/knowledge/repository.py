@@ -2,6 +2,7 @@
 
 import json
 import math
+import re
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
 
@@ -37,6 +38,23 @@ class KnowledgeRepository(ABC):
         document_ids: Optional[List[str]] = None,
     ) -> List[RetrievedChunk]:
         """Return the top-k most similar chunks with provenance, optionally filtered to document_ids."""
+
+    async def bm25_search(
+        self,
+        query: str,
+        top_k: int,
+        document_ids: Optional[List[str]] = None,
+    ) -> List[RetrievedChunk]:
+        """Return top-k chunks matching the query using BM25 keyword scoring."""
+        return []
+
+    async def lookup_by_article(
+        self,
+        article_path: str,
+        document_ids: Optional[List[str]] = None,
+    ) -> List[RetrievedChunk]:
+        """Return chunks matching an exact or normalized article path (e.g. '3.2.1')."""
+        return []
 
     async def has_document(self, document_id: str) -> bool:
         """Check whether a document is already stored in the repository."""
@@ -113,8 +131,90 @@ class InMemoryKnowledgeRepository(KnowledgeRepository):
             if len(stored.embedding) != len(query_embedding):
                 raise KnowledgeRepositoryError("Query embedding dimension does not match stored embeddings.")
             score = _cosine_similarity(query_embedding, stored.embedding)
-            results.append(RetrievedChunk(**stored.model_dump(exclude={"embedding"}), similarity_score=score))
+            results.append(
+                RetrievedChunk(
+                    **stored.model_dump(exclude={"embedding"}),
+                    similarity_score=score,
+                    score=score,
+                    retrieval_method="dense",
+                )
+            )
         return sorted(results, key=lambda chunk: chunk.similarity_score, reverse=True)[:top_k]
+
+    async def bm25_search(
+        self,
+        query: str,
+        top_k: int,
+        document_ids: Optional[List[str]] = None,
+    ) -> List[RetrievedChunk]:
+        if top_k < 1:
+            raise KnowledgeRepositoryError("top_k must be at least 1.")
+        if not query or not query.strip():
+            return []
+
+        candidates = [
+            c for c in self.chunks.values()
+            if document_ids is None or c.document_id in document_ids
+        ]
+        if not candidates:
+            return []
+
+        from app.knowledge.bm25 import BM25Okapi, tokenize
+
+        corpus = [
+            tokenize(f"{c.article_path or ''} {c.heading or ''} {c.content} {c.metadata.get('embedding_text', '')}")
+            for c in candidates
+        ]
+        bm25 = BM25Okapi(corpus)
+        scored_candidates = bm25.search(query, candidates, top_k=top_k)
+
+        return [
+            RetrievedChunk(
+                **chunk.model_dump(exclude={"embedding"}),
+                similarity_score=score,
+                score=score,
+                retrieval_method="bm25",
+            )
+            for chunk, score in scored_candidates
+        ]
+
+    async def lookup_by_article(
+        self,
+        article_path: str,
+        document_ids: Optional[List[str]] = None,
+    ) -> List[RetrievedChunk]:
+        clean_path = article_path.strip().lower()
+        if not clean_path:
+            return []
+
+        # Remove leading "article " or "section " prefix for normalized comparison
+        normalized_target = re.sub(r"^(?:article|section)\s*", "", clean_path).strip()
+
+        results: List[RetrievedChunk] = []
+        for stored in self.chunks.values():
+            if document_ids is not None and stored.document_id not in document_ids:
+                continue
+            chunk_art = stored.article_path or stored.metadata.get("article_path", "")
+            if not chunk_art:
+                continue
+            clean_chunk_art = chunk_art.strip().lower()
+            normalized_chunk = re.sub(r"^(?:article|section)\s*", "", clean_chunk_art).strip()
+
+            if (
+                clean_chunk_art == clean_path
+                or normalized_chunk == normalized_target
+                or normalized_chunk.startswith(f"{normalized_target}.")
+            ):
+                results.append(
+                    RetrievedChunk(
+                        **stored.model_dump(exclude={"embedding"}),
+                        similarity_score=1.0,
+                        score=1.0,
+                        retrieval_method="direct_article_lookup",
+                    )
+                )
+
+        return results
 
 
 class PostgresPgvectorKnowledgeRepository(KnowledgeRepository):
@@ -227,6 +327,81 @@ class PostgresPgvectorKnowledgeRepository(KnowledgeRepository):
             RetrievedChunk(
                 id=row[0], document_id=row[1], chunk_index=row[2], source=row[3],
                 content=row[4], metadata=row[5], similarity_score=float(row[6]),
+                score=float(row[6]), retrieval_method="dense",
+            )
+            for row in rows
+        ]
+
+    async def bm25_search(
+        self,
+        query: str,
+        top_k: int,
+        document_ids: Optional[List[str]] = None,
+    ) -> List[RetrievedChunk]:
+        if top_k < 1:
+            raise KnowledgeRepositoryError("top_k must be at least 1.")
+        if not query or not query.strip():
+            return []
+
+        connection = await self._connect()
+        async with connection:
+            async with connection.cursor() as cursor:
+                query_sql = """
+                    SELECT id, document_id, chunk_index, source, content, metadata,
+                    ts_rank_cd(to_tsvector('english', content), plainto_tsquery('english', %s)) AS bm25_score
+                    FROM knowledge_chunks
+                    WHERE to_tsvector('english', content) @@ plainto_tsquery('english', %s)
+                """
+                params: list = [query, query]
+                if document_ids is not None:
+                    query_sql += " AND document_id = ANY(%s)"
+                    params.append(document_ids)
+                query_sql += """
+                    ORDER BY ts_rank_cd(to_tsvector('english', content), plainto_tsquery('english', %s)) DESC
+                    LIMIT %s
+                """
+                params.extend([query, top_k])
+                await cursor.execute(query_sql, tuple(params))
+                rows = await cursor.fetchall()
+        return [
+            RetrievedChunk(
+                id=row[0], document_id=row[1], chunk_index=row[2], source=row[3],
+                content=row[4], metadata=row[5], similarity_score=float(row[6]),
+                score=float(row[6]), retrieval_method="bm25",
+            )
+            for row in rows
+        ]
+
+    async def lookup_by_article(
+        self,
+        article_path: str,
+        document_ids: Optional[List[str]] = None,
+    ) -> List[RetrievedChunk]:
+        clean_path = article_path.strip()
+        if not clean_path:
+            return []
+
+        connection = await self._connect()
+        async with connection:
+            async with connection.cursor() as cursor:
+                query_sql = """
+                    SELECT id, document_id, chunk_index, source, content, metadata,
+                    1.0 AS score
+                    FROM knowledge_chunks
+                    WHERE (metadata->>'article_path' ILIKE %s OR metadata->>'article_path' = %s)
+                """
+                params: list = [f"%{clean_path}%", clean_path]
+                if document_ids is not None:
+                    query_sql += " AND document_id = ANY(%s)"
+                    params.append(document_ids)
+                query_sql += " ORDER BY chunk_index ASC LIMIT 10"
+                await cursor.execute(query_sql, tuple(params))
+                rows = await cursor.fetchall()
+        return [
+            RetrievedChunk(
+                id=row[0], document_id=row[1], chunk_index=row[2], source=row[3],
+                content=row[4], metadata=row[5], similarity_score=float(row[6]),
+                score=float(row[6]), retrieval_method="direct_article_lookup",
             )
             for row in rows
         ]
