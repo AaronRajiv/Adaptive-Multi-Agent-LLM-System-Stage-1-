@@ -57,6 +57,24 @@ class EvaluationResult(BaseModel):
         ...,
         description="Constructive critique evaluating correctness, completeness, relevance, and clarity"
     )
+    groundedness_score: Optional[int] = Field(
+        default=None, ge=0, le=25, description="Groundedness and source fidelity (0-25 pts)"
+    )
+    coverage_score: Optional[int] = Field(
+        default=None, ge=0, le=25, description="Coverage of every domain in the question (0-25 pts)"
+    )
+    distinction_score: Optional[int] = Field(
+        default=None, ge=0, le=25, description="Distinction between explicit regulatory and inference (0-25 pts)"
+    )
+    honesty_score: Optional[int] = Field(
+        default=None, ge=0, le=25, description="Honesty about limits and unknowns without definitive claims (0-25 pts)"
+    )
+    uncovered_domains: List[str] = Field(
+        default_factory=list, description="List of technical domains lacking sufficient coverage or evidence"
+    )
+    verification_result: Optional[Dict[str, Any]] = Field(
+        default=None, description="Deterministic programmatic grounding verification metrics"
+    )
 
 
 class StageTrace(BaseModel):
@@ -157,6 +175,7 @@ class RunResponse(BaseModel):
     retrieved_chunks: List[Any] = Field(default_factory=list, description="All retrieved knowledge chunks with provenance")
     task_execution_traces: List[TaskExecutionTrace] = Field(default_factory=list, description="Per-task execution traces from Orchestrator")
     evidence_ledger: Optional[Dict[str, Any]] = Field(default=None, description="Shared canonical Evidence Ledger for the run")
+    verification_result: Optional[Dict[str, Any]] = Field(default=None, description="Programmatic grounding verification metrics from verifier")
 
 
 class SystemStatusResponse(BaseModel):

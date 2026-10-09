@@ -53,6 +53,12 @@ class Settings(BaseSettings):
         le=100,
         description="Minimum score (0-100) required for the Evaluator to award PASS status"
     )
+    max_replanning_rounds: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        description="Maximum number of targeted replanning rounds if evaluation or verification fails"
+    )
 
     # Server / Network configuration
     cors_origins: str = Field(

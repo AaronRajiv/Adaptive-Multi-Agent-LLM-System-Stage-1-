@@ -100,7 +100,7 @@ class EvidenceLedger(BaseModel):
             chunk_id=chunk.id,
             document_id=chunk.document_id,
             document_label=label,
-            article_path=meta.get("article_path"),
+            article_path=meta.get("article_path") or meta.get("article"),
             page_start=meta.get("page_start") if isinstance(meta.get("page_start"), int) else None,
             page_end=meta.get("page_end") if isinstance(meta.get("page_end"), int) else None,
             heading=meta.get("heading"),
@@ -130,8 +130,22 @@ class EvidenceLedger(BaseModel):
         norm = article_path.strip().lower()
         return [
             item for item in self.items.values()
-            if item.article_path and item.article_path.strip().lower() == norm
+            if (item.article_path and (item.article_path.strip().lower() == norm or norm in item.article_path.strip().lower()))
+            or (norm in item.citation.lower())
         ]
+
+    def lookup_by_article(self, article_path: str) -> List[EvidenceItem]:
+        """Alias for find_by_article."""
+        return self.find_by_article(article_path)
+
+    def get_ledger_summary(self) -> Dict[str, Any]:
+        """Return high-level summary of ledger items and indexed articles."""
+        articles = [item.article_path for item in self.items.values() if item.article_path]
+        return {
+            "total_chunks": len(self.items),
+            "indexed_articles": list(set(articles)),
+            "citations": self.all_citations(),
+        }
 
     def format_for_prompt(self, max_chunks: Optional[int] = None) -> str:
         """

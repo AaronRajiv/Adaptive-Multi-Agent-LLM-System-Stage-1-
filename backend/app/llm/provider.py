@@ -176,7 +176,12 @@ class MockLLMProvider(LLMProvider):
             mock_data = {
                 "score": 88,
                 "status": "PASS",
-                "feedback": "The analytical synthesis is comprehensive, well-structured, covers all core dimensions, and directly addresses the user query with clarity.",
+                "feedback": "The analytical synthesis is comprehensive, well-grounded in cited evidence, and directly addresses the user query with clarity.",
+                "groundedness_score": 23,
+                "coverage_score": 22,
+                "distinction_score": 22,
+                "honesty_score": 21,
+                "uncovered_domains": [],
             }
             return schema.model_validate(mock_data)
 

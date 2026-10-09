@@ -38,6 +38,7 @@ from app.orchestration.agents import (
     ResearchTaskAgent,
 )
 from app.orchestration.evidence_ledger import EvidenceLedger
+from app.orchestration.grounding_verifier import GroundingVerifier, GroundingVerificationResult
 from app.orchestration.orchestrator import GraphExecutionStatus, Orchestrator
 from app.logging_config import get_logger
 from app.orchestration.strategy import ExecutionStrategy, StrategySelector
@@ -529,10 +530,14 @@ class OrchestratedPipeline:
             )
         )
 
-        # Stage 5: Evaluator Agent (Genuine 4-dimension audit scoring)
+        # Stage 5: Evaluator Agent Audit
         await self._emit(ExecutionEventType.EVALUATION_STARTED, message="Evaluation started.")
         t_eval = time.perf_counter()
-        evaluation_output = await self.evaluator.evaluate(user_task, analysis_text)
+        evaluation_output = await self.evaluator.evaluate(
+            user_task=user_task,
+            analysis=analysis_text,
+            evidence_ledger=evidence_ledger,
+        )
         eval_dur = round((time.perf_counter() - t_eval) * 1000, 2)
         traces.append(
             StageTrace(
@@ -549,17 +554,84 @@ class OrchestratedPipeline:
             metadata={"score": evaluation_output.score, "status": evaluation_output.status},
         )
 
-        # Targeted Iterative Replanning with Feedback Injection
-        replanning_count = 0
-        max_replans = 1
-        if evaluation_output.status == "FAIL" and replanning_count < max_replans:
-            replanning_count += 1
-            await self._emit(
-                ExecutionEventType.REPLANNING_STARTED,
-                message=f"Targeted replanning triggered (Iter {replanning_count}): Score {evaluation_output.score}/100."
+        # Stage 6: Synthesis Agent (incorporates analysis + evaluation feedback)
+        await self._emit(ExecutionEventType.SYNTHESIS_STARTED, message="Synthesis started.")
+        t_synth = time.perf_counter()
+        final_answer = await self.synthesizer.synthesize(
+            user_task,
+            research_results,
+            analysis_text,
+            evaluation=evaluation_output,
+            evidence_ledger=evidence_ledger,
+            history=history,
+        )
+        synth_dur = round((time.perf_counter() - t_synth) * 1000, 2)
+        traces.append(
+            StageTrace(
+                stage_name="Synthesis",
+                agent_name="SynthesizerAgent",
+                duration_ms=synth_dur,
+                status="SUCCESS",
+                summary="Generated user-facing response.",
             )
-            t_replan = time.perf_counter()
+        )
+        await self._emit(ExecutionEventType.SYNTHESIS_COMPLETED, message="Synthesis completed.")
+
+        # Stage 7: Programmatic Grounding Verifier (No LLM)
+        verifier_result = GroundingVerifier.verify(
+            text=final_answer,
+            evidence_ledger=evidence_ledger,
+            min_validity_threshold=80.0,
+        )
+        if verifier_result:
+            evaluation_output.verification_result = verifier_result.model_dump()
+
+        # Stage 8: Targeted Iterative Replanning with Feedback & Query Refinement
+        replanning_count = 0
+        max_replans = getattr(self.settings, "max_replanning_rounds", 2)
+
+        while (evaluation_output.status == "FAIL" or (verifier_result and not verifier_result.passed)) and replanning_count < max_replans:
+            replanning_count += 1
+            round_start_score = evaluation_output.score or 0
+
+            # Identify weak / uncovered domains
+            target_domains = list(evaluation_output.uncovered_domains or [])
+            target_tasks = []
             for r in research_results:
+                task_node = graph.get_task(r.subtask_id) if graph else None
+                task_domain = str(task_node.metadata.get("domain") or "").lower() if task_node and task_node.metadata else ""
+                is_targeted = False
+                if target_domains:
+                    is_targeted = any(d.lower() in task_domain or task_domain in d.lower() for d in target_domains)
+                if not is_targeted:
+                    is_targeted = bool(r.missing_evidence) or (
+                        bool(evaluation_output.feedback) and (
+                            r.subtask_id in evaluation_output.feedback
+                            or (task_domain and task_domain in evaluation_output.feedback.lower())
+                        )
+                    )
+                if is_targeted:
+                    target_tasks.append(r)
+
+            if not target_tasks:
+                target_tasks = list(research_results)
+
+            replan_msg = (
+                f"Targeted replanning round {replanning_count}/{max_replans} triggered: "
+                f"Score {round_start_score}/100. Targeting {len(target_tasks)} subtask(s)."
+            )
+            replan_start_meta = {
+                "round": replanning_count,
+                "initial_score": round_start_score,
+                "target_subtask_ids": [t.subtask_id for t in target_tasks],
+            }
+            await self._emit(ExecutionEventType.REPLANNING_STARTED, message=replan_msg, metadata=replan_start_meta)
+            await self._emit(ExecutionEventType.REPLAN_STARTED, message=replan_msg, metadata=replan_start_meta)
+
+            t_replan = time.perf_counter()
+
+            # Execute targeted retrieval query refinement and re-run targeted subtasks
+            for r in target_tasks:
                 task_res = exec_result.task_results.get(r.subtask_id)
                 rc: Optional[RetrievedContext] = None
                 if task_res and task_res.metadata and "retrieved_context" in task_res.metadata:
@@ -567,6 +639,30 @@ class OrchestratedPipeline:
                         rc = RetrievedContext.model_validate(task_res.metadata["retrieved_context"])
                     except Exception:
                         rc = None
+
+                task_node = graph.get_task(r.subtask_id) if graph else None
+                if self.retrieval_service and task_node and task_node.metadata:
+                    meta = task_node.metadata
+                    queries = meta.get("retrieval_queries") or ([meta.get("retrieval_query")] if meta.get("retrieval_query") else [])
+                    for q in queries:
+                        if q:
+                            try:
+                                targeted_ctx = await self.retrieval_service.retrieve(
+                                    query=str(q),
+                                    top_k=meta.get("retrieval_top_k", 5),
+                                    document_ids=document_ids or None,
+                                )
+                                if targeted_ctx and targeted_ctx.chunks:
+                                    if evidence_ledger:
+                                        evidence_ledger.add_chunks(targeted_ctx.chunks)
+                                    if rc is None:
+                                        rc = targeted_ctx
+                                    else:
+                                        existing_ids = {c.id for c in rc.chunks}
+                                        new_chunks = [c for c in targeted_ctx.chunks if c.id not in existing_ids]
+                                        rc.chunks.extend(new_chunks)
+                            except Exception as exc:
+                                logger.warning("Targeted retrieval during replanning failed for '%s': %s", q, exc)
 
                 revised_prompt = (
                     f"{r.subtask_description}\n\n"
@@ -588,11 +684,39 @@ class OrchestratedPipeline:
                 if re_research.missing_evidence:
                     r.missing_evidence = re_research.missing_evidence
 
+            # Re-run analysis with revised research findings and updated ledger
             analysis_text = await self.analyst.analyze(
                 user_task, research_results, evidence_ledger=evidence_ledger
             )
-            evaluation_output = await self.evaluator.evaluate(user_task, analysis_text)
+
+            # Re-synthesize final answer
+            final_answer = await self.synthesizer.synthesize(
+                user_task,
+                research_results,
+                analysis_text,
+                evaluation=evaluation_output,
+                evidence_ledger=evidence_ledger,
+                history=history,
+            )
+
+            # Re-verify with programmatic verifier
+            verifier_result = GroundingVerifier.verify(
+                text=final_answer,
+                evidence_ledger=evidence_ledger,
+                min_validity_threshold=80.0,
+            )
+
+            # Re-evaluate
+            evaluation_output = await self.evaluator.evaluate(
+                user_task=user_task,
+                analysis=analysis_text,
+                final_answer=final_answer,
+                evidence_ledger=evidence_ledger,
+                verification_result=verifier_result,
+            )
             replan_dur = round((time.perf_counter() - t_replan) * 1000, 2)
+            revised_score = evaluation_output.score or 0
+            score_improved = revised_score > round_start_score
 
             traces.append(
                 StageTrace(
@@ -600,37 +724,26 @@ class OrchestratedPipeline:
                     agent_name="Evaluator+Researcher",
                     duration_ms=replan_dur,
                     status="SUCCESS",
-                    summary=f"Replanning completed. Revised evaluation score: {evaluation_output.score}/100."
+                    summary=f"Replanning completed. Revised evaluation score: {revised_score}/100.",
                 )
             )
-            await self._emit(
-                ExecutionEventType.REPLANNING_COMPLETED,
-                message=f"Replanning completed: Revised score {evaluation_output.score}/100.",
-                metadata={"score": evaluation_output.score, "status": evaluation_output.status},
-            )
 
-        # Stage 6: Synthesizer Agent
-        await self._emit(ExecutionEventType.SYNTHESIS_STARTED, message="Synthesis started.")
-        t_synth = time.perf_counter()
-        final_answer = await self.synthesizer.synthesize(
-            user_task,
-            research_results,
-            analysis_text,
-            evaluation_output,
-            evidence_ledger=evidence_ledger,
-            history=history,
-        )
-        synth_dur = round((time.perf_counter() - t_synth) * 1000, 2)
-        traces.append(
-            StageTrace(
-                stage_name="Synthesis",
-                agent_name="SynthesizerAgent",
-                duration_ms=synth_dur,
-                status="SUCCESS",
-                summary="Generated final user-facing response.",
+            replan_comp_msg = (
+                f"Replanning round {replanning_count} completed: Revised score {revised_score}/100 "
+                f"(improved: {score_improved})."
             )
-        )
-        await self._emit(ExecutionEventType.SYNTHESIS_COMPLETED, message="Synthesis completed.")
+            replan_comp_meta = {
+                "round": replanning_count,
+                "initial_score": round_start_score,
+                "revised_score": revised_score,
+                "score_improved": score_improved,
+                "status": evaluation_output.status,
+            }
+            await self._emit(ExecutionEventType.REPLANNING_COMPLETED, message=replan_comp_msg, metadata=replan_comp_meta)
+            await self._emit(ExecutionEventType.REPLAN_COMPLETED, message=replan_comp_msg, metadata=replan_comp_meta)
+
+            if evaluation_output.status == "PASS" and (not verifier_result or verifier_result.passed):
+                break
 
         response = RunResponse(
             run_id=run_id,
@@ -648,6 +761,7 @@ class OrchestratedPipeline:
             retrieved_chunks=retrieved_chunks_collected,
             task_execution_traces=exec_result.execution_trace,
             evidence_ledger=evidence_ledger.model_dump(),
+            verification_result=verifier_result.model_dump() if verifier_result else None,
         )
 
         record_run(response)

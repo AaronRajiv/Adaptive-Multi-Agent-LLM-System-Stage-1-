@@ -38,7 +38,7 @@ class SynthesizerAgent:
         user_task: str,
         research_results: List[ResearchResult],
         analysis: str,
-        evaluation: EvaluationResult,
+        evaluation: Optional[EvaluationResult] = None,
         evidence_ledger: Optional[EvidenceLedger] = None,
         history: Optional[List[ChatMessagePayload]] = None,
     ) -> str:
@@ -49,7 +49,7 @@ class SynthesizerAgent:
             user_task: The original user task.
             research_results: List of ResearchResult objects.
             analysis: The analytical synthesis from AnalystAgent.
-            evaluation: The EvaluationResult from EvaluatorAgent.
+            evaluation: Optional EvaluationResult from EvaluatorAgent.
             evidence_ledger: Optional shared canonical Evidence Ledger.
             history: Optional conversation history.
 
@@ -70,14 +70,20 @@ class SynthesizerAgent:
         if evidence_ledger is not None and len(evidence_ledger) > 0:
             ledger_text = f"\n\nGrounding Evidence Ledger Citations:\n{', '.join(evidence_ledger.all_citations())}\n"
 
+        eval_text = ""
+        if evaluation is not None:
+            eval_text = (
+                f"\nEvaluator Score: {evaluation.score}/100 (Status: {evaluation.status})\n"
+                f"Evaluator Feedback:\n{evaluation.feedback}\n"
+            )
+
         prompt = (
             f"{history_text}"
             f"Current User Task:\n\"{user_task.strip()}\"\n\n"
             f"Collected Research Subtasks & Findings:\n{research_summary}\n\n"
             f"Analyst Agent Findings:\n{analysis}\n"
-            f"{ledger_text}\n"
-            f"Evaluator Score: {evaluation.score}/100 (Status: {evaluation.status})\n"
-            f"Evaluator Feedback:\n{evaluation.feedback}\n\n"
+            f"{ledger_text}"
+            f"{eval_text}\n"
             f"Please generate the grounded, user-facing response following the mandatory section structure: "
             f"'### Explicit Regulatory Requirements', '### Engineering Interpretation / Inference', and '### Limitations and Unknowns'. "
             f"Preserve all citations and do not quantify lap-time gains unless the text explicitly states them."
