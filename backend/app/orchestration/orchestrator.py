@@ -187,7 +187,9 @@ class Orchestrator:
         if query is None or not str(query).strip():
             return None
         if self.retrieval_service is None:
-            return None
+            raise RuntimeError(
+                f"Task '{task.id}' requested retrieval for query '{query}', but retrieval service is not available."
+            )
         top_k = metadata.get("retrieval_top_k", 3)
         if not isinstance(top_k, int):
             raise ValueError("retrieval_top_k must be an integer.")

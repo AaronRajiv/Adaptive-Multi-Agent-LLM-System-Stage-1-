@@ -139,49 +139,33 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
 
                     if len(vectors) == len(batch_texts):
                         return vectors
+                    raise EmbeddingError(
+                        f"Expected {len(batch_texts)} embedding vectors, but received {len(vectors)}."
+                    )
 
-                # Handle transient 429/503/500 capacity or rate limits with backoff
-                if response.status_code in (429, 503, 500) and attempt < max_retries - 1:
+                # Transient rate-limit or temporary server issues: retry with exponential backoff
+                if response.status_code in (429, 500, 503) and attempt < max_retries - 1:
                     await asyncio.sleep(1.0 * (2 ** attempt))
                     continue
 
-                if response.status_code in (400, 404):
-                    return await self._fallback_individual_embeds(batch_texts)
+                # Permanent error or retries exhausted
+                err_text = response.text
+                try:
+                    err_json = response.json()
+                    err_text = err_json.get("error", {}).get("message", err_text)
+                except Exception:
+                    pass
+                raise EmbeddingError(
+                    f"Gemini embedding API failed (HTTP {response.status_code}): {err_text}"
+                )
 
-            except httpx.RequestError:
+            except httpx.RequestError as exc:
                 if attempt < max_retries - 1:
                     await asyncio.sleep(1.0 * (2 ** attempt))
                     continue
-
-        return await self._fallback_individual_embeds(batch_texts)
-
-    async def _fallback_individual_embeds(self, batch_texts: List[str]) -> List[List[float]]:
-        import asyncio
-
-        sem = asyncio.Semaphore(10)
-
-        async def _single_embed(t: str) -> List[float]:
-            async with sem:
-                url = f"{self.base_url}/{self.model}:embedContent"
-                payload = {"content": {"parts": [{"text": t.strip() or " "}]}}
-                if self.output_dimensions is not None:
-                    payload["outputDimensionality"] = self.output_dimensions
-                try:
-                    async with httpx.AsyncClient(timeout=30.0) as client:
-                        response = await client.post(
-                            url,
-                            json=payload,
-                            headers={"Content-Type": "application/json", "x-goog-api-key": self.api_key},
-                        )
-                    if response.status_code == 200:
-                        values = response.json()["embedding"]["values"]
-                        return [float(v) for v in values]
-                except Exception:
-                    pass
-                mock = MockEmbeddingProvider(dimensions=self.output_dimensions or 64)
-                return await mock.embed(t or "fallback")
-
-        return list(await asyncio.gather(*[_single_embed(t) for t in batch_texts]))
+                raise EmbeddingError(
+                    f"Network error connecting to Gemini embedding API after {max_retries} attempts: {exc}"
+                ) from exc
 
 
 def get_embedding_provider(config):
@@ -197,7 +181,7 @@ def get_embedding_provider(config):
     if provider_name == "gemini":
         api_key = config.embedding_api_key or config.llm_api_key
         if not api_key:
-            return MockEmbeddingProvider(dimensions=config.knowledge_embedding_dimensions)
+            raise EmbeddingError("Gemini embedding API key is missing. Set GEMINI_API_KEY or KNOWLEDGE_EMBEDDING_API_KEY.")
         return GeminiEmbeddingProvider(
             api_key=api_key,
             model=config.embedding_model,

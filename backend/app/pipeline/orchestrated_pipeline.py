@@ -77,6 +77,8 @@ class OrchestratedPipeline:
         self.synthesizer = SynthesizerAgent(self.llm)
 
         # Retrieval Service Setup
+        # Retrieval Service Setup
+        self._retrieval_init_error: Optional[str] = None
         if retrieval_service is not None:
             self.retrieval_service = retrieval_service
         else:
@@ -84,7 +86,9 @@ class OrchestratedPipeline:
                 embedding_provider = get_embedding_provider(settings)
                 repo = knowledge_repository or InMemoryKnowledgeRepository()
                 self.retrieval_service = RetrievalService(embedding_provider, repo)
-            except Exception:
+            except Exception as exc:
+                self._retrieval_init_error = str(exc)
+                logger.warning("Failed to initialize default RetrievalService: %s", exc)
                 self.retrieval_service = None
 
         # Capability Registry Setup
@@ -111,8 +115,15 @@ class OrchestratedPipeline:
 
         await self._emit(ExecutionEventType.RUN_STARTED, message=f"Pipeline started for task: {user_task[:100]}")
 
-        # Ingest attached documents if present and RAG retrieval service is enabled
-        if documents and self.retrieval_service:
+        # Validate and ingest attached documents if present
+        if documents:
+            if not self.retrieval_service:
+                reason = self._retrieval_init_error or "Retrieval service is not configured or failed to initialize"
+                err_msg = f"Documents were provided but retrieval service is not available ({reason})."
+                logger.error(err_msg)
+                await self._emit(ExecutionEventType.RUN_FAILED, message=err_msg)
+                raise RuntimeError(err_msg)
+
             try:
                 import hashlib
                 from app.knowledge.chunking import FixedSizeTextChunker
@@ -144,15 +155,15 @@ class OrchestratedPipeline:
                         )
                         res = await ingestion_service.ingest(knowledge_doc)
                         if res.failed:
-                            await self._emit(
-                                ExecutionEventType.RAG_FAILED,
-                                message=f"Document '{fname}' ingestion failed: {res.error_message}",
-                            )
+                            err_msg = f"Document '{fname}' ingestion failed: {res.error_message}"
+                            logger.error(err_msg)
+                            await self._emit(ExecutionEventType.RUN_FAILED, message=err_msg)
+                            raise RuntimeError(err_msg)
             except Exception as e:
-                await self._emit(
-                    ExecutionEventType.RAG_FAILED,
-                    message=f"Document ingestion error: {str(e)}",
-                )
+                err_msg = f"Document ingestion failed: {str(e)}"
+                logger.error(err_msg, exc_info=True)
+                await self._emit(ExecutionEventType.RUN_FAILED, message=err_msg)
+                raise RuntimeError(err_msg) from e
 
         try:
             return await self._execute_inner(
@@ -277,7 +288,12 @@ class OrchestratedPipeline:
 
             retrieved_chunks_collected: List[RetrievedChunk] = []
             retrieval_context_prompt = ""
-            if decision.requires_rag and self.retrieval_service:
+            if decision.requires_rag:
+                if not self.retrieval_service:
+                    err_msg = "Task requires RAG retrieval but retrieval service is not available."
+                    logger.error(err_msg)
+                    await self._emit(ExecutionEventType.RUN_FAILED, message=err_msg)
+                    raise RuntimeError(err_msg)
                 await self._emit(ExecutionEventType.RAG_STARTED, message="Retrieving knowledge context...")
                 try:
                     ctx = await self.retrieval_service.retrieve(user_task, top_k=3)
@@ -286,8 +302,11 @@ class OrchestratedPipeline:
                         snippets = [f"[{c.source}]: {c.content}" for c in ctx.chunks]
                         retrieval_context_prompt = "\n\nRetrieved Knowledge Base Context:\n" + "\n\n".join(snippets) + "\n\n"
                     await self._emit(ExecutionEventType.RAG_COMPLETED, message=f"Retrieved {len(ctx.chunks)} chunks.")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    err_msg = f"Knowledge retrieval failed: {str(exc)}"
+                    logger.error(err_msg, exc_info=True)
+                    await self._emit(ExecutionEventType.RUN_FAILED, message=err_msg)
+                    raise RuntimeError(err_msg) from exc
 
             await self._emit(ExecutionEventType.SYNTHESIS_STARTED, message="Generating single-agent response.")
             history_text = ""
@@ -422,6 +441,12 @@ class OrchestratedPipeline:
                 )
             elif task.type == TaskType.ANALYSIS and result.success:
                 analysis_outputs.append(str(result.output or ""))
+
+        if (has_documents or decision.requires_rag) and not research_results:
+            err_msg = f"Multi-agent research produced no findings for document-grounded task (Graph status: {exec_result.status.value})."
+            logger.error(err_msg)
+            await self._emit(ExecutionEventType.RUN_FAILED, message=err_msg)
+            raise RuntimeError(err_msg)
 
         research_dur = sum(
             t.duration_ms for t in exec_result.execution_trace if t.capability == "research"
