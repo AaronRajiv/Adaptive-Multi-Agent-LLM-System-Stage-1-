@@ -22,6 +22,10 @@ class DocumentChunk(BaseModel):
     chunk_index: int = Field(..., ge=0)
     source: str = Field(..., min_length=1)
     content: str = Field(..., min_length=1)
+    page_start: int | None = Field(default=None, description="Starting 1-indexed page number")
+    page_end: int | None = Field(default=None, description="Ending 1-indexed page number")
+    article_path: str | None = Field(default=None, description="Extracted regulation article path (e.g., '3.2.1')")
+    heading: str | None = Field(default=None, description="Section or article heading")
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 

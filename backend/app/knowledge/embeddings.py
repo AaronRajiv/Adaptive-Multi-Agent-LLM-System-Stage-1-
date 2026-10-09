@@ -17,12 +17,18 @@ class EmbeddingProvider(ABC):
     """Provider-agnostic contract for converting text into numeric vectors."""
 
     @abstractmethod
-    async def embed(self, text: str) -> List[float]:
+    async def embed(self, text: str, task_type: str | None = None) -> List[float]:
         """Generate one embedding vector for non-empty text."""
 
-    async def embed_many(self, texts: List[str]) -> List[List[float]]:
+    async def embed_many(self, texts: List[str], task_type: str | None = None) -> List[List[float]]:
         """Generate embeddings in input order; providers may override for batching."""
-        return [await self.embed(text) for text in texts]
+        results: List[List[float]] = []
+        for text in texts:
+            try:
+                results.append(await self.embed(text, task_type=task_type))
+            except TypeError:
+                results.append(await self.embed(text))
+        return results
 
 
 class MockEmbeddingProvider(EmbeddingProvider):
@@ -33,7 +39,7 @@ class MockEmbeddingProvider(EmbeddingProvider):
             raise ValueError("Embedding dimensions must be at least 1.")
         self.dimensions = dimensions
 
-    async def embed(self, text: str) -> List[float]:
+    async def embed(self, text: str, task_type: str | None = None) -> List[float]:
         tokens = re.findall(r"[a-z0-9]+", text.lower())
         if not tokens:
             raise EmbeddingError("Cannot embed empty text.")
@@ -47,6 +53,9 @@ class MockEmbeddingProvider(EmbeddingProvider):
 
         magnitude = math.sqrt(sum(value * value for value in vector))
         return [value / magnitude for value in vector] if magnitude else vector
+
+    async def embed_many(self, texts: List[str], task_type: str | None = None) -> List[List[float]]:
+        return [await self.embed(text, task_type=task_type) for text in texts]
 
 
 class GeminiEmbeddingProvider(EmbeddingProvider):
@@ -69,13 +78,13 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         self.max_concurrency = max(1, max_concurrency)
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
 
-    async def embed(self, text: str) -> List[float]:
-        results = await self.embed_many([text])
+    async def embed(self, text: str, task_type: str | None = None) -> List[float]:
+        results = await self.embed_many([text], task_type=task_type)
         if not results:
             raise EmbeddingError("Failed to generate embedding.")
         return results[0]
 
-    async def embed_many(self, texts: List[str]) -> List[List[float]]:
+    async def embed_many(self, texts: List[str], task_type: str | None = None) -> List[List[float]]:
         if not texts:
             return []
 
@@ -87,7 +96,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
 
         async def _process_batch(batch_texts: List[str]) -> List[List[float]]:
             async with semaphore:
-                return await self._embed_batch_with_retry(batch_texts)
+                return await self._embed_batch_with_retry(batch_texts, task_type=task_type)
 
         results_by_batch = await asyncio.gather(*[_process_batch(b) for b in batches])
 
@@ -101,7 +110,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         return all_vectors
 
     async def _embed_batch_with_retry(
-        self, batch_texts: List[str], max_retries: int = 3
+        self, batch_texts: List[str], task_type: str | None = None, max_retries: int = 3
     ) -> List[List[float]]:
         import asyncio
 
@@ -114,6 +123,8 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
                 "model": formatted_model,
                 "content": {"parts": [{"text": text.strip() or " "}]},
             }
+            if task_type:
+                req["taskType"] = task_type
             if self.output_dimensions is not None:
                 req["outputDimensionality"] = self.output_dimensions
             requests_payload.append(req)

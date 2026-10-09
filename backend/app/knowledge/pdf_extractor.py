@@ -1,40 +1,83 @@
 """
-Document Text Extraction Module with PDF and Base64 Parsing Support.
+Document Text Extraction Module with Multi-Page PDF and Structure Parsing Support.
 """
 
 import base64
 import io
 import re
+from typing import List, Tuple, Union
 
 from app.logging_config import get_logger
-
-from typing import Union
 
 logger = get_logger("app.knowledge.pdf_extractor")
 
 
-def extract_text_from_document(filename: str, content: Union[str, bytes]) -> str:
+def _structure_tables_in_text(text: str) -> str:
     """
-    Extract readable plain text from attached document content.
-    Handles plain text, markdown, JSON, and PDF files (bytes, Base64 or string).
+    Detect tabular row patterns and format them cleanly with markdown pipes,
+    or preserve text structure if already structured.
     """
-    if not content:
+    if not text:
         return ""
 
+    lines = text.split("\n")
+    formatted_lines: List[str] = []
+    has_table_patterns = False
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            formatted_lines.append("")
+            continue
+
+        # Check if line has tab-separated values or multi-column spacing (>= 3 spaces between terms)
+        if "\t" in stripped:
+            cells = [c.strip() for c in stripped.split("\t") if c.strip()]
+            if len(cells) >= 2:
+                formatted_lines.append("| " + " | ".join(cells) + " |")
+                has_table_patterns = True
+                continue
+        elif re.search(r"\S\s{3,}\S", stripped):
+            cells = [c.strip() for c in re.split(r"\s{3,}", stripped) if c.strip()]
+            if len(cells) >= 2:
+                formatted_lines.append("| " + " | ".join(cells) + " |")
+                has_table_patterns = True
+                continue
+
+        formatted_lines.append(line)
+
+    result = "\n".join(formatted_lines).strip()
+    if not has_table_patterns and ("table" in text.lower() or "---" in text):
+        logger.debug("Tables in text block flattened to text without structural delimiters.")
+
+    return result
+
+
+def extract_pages_from_document(
+    filename: str, content: Union[str, bytes]
+) -> List[Tuple[int, str]]:
+    """
+    Extract readable text per page from attached document content.
+    Returns a list of tuples: (page_number, page_text) with 1-indexed page numbers.
+    """
+    if not content:
+        return []
+
     fname_lower = filename.lower()
-    pdf_bytes = None
+    pdf_bytes: bytes | None = None
 
     if isinstance(content, bytes):
         if fname_lower.endswith(".pdf") or content.startswith(b"%PDF"):
             pdf_bytes = content
         else:
             try:
-                return content.decode("utf-8").strip()
+                raw_text = content.decode("utf-8").strip()
             except UnicodeDecodeError:
-                return content.decode("latin1", errors="ignore").strip()
+                raw_text = content.decode("latin1", errors="ignore").strip()
+            return _split_non_pdf_pages(raw_text)
     else:
         if not content.strip():
-            return ""
+            return []
         is_pdf = (
             fname_lower.endswith(".pdf")
             or content.startswith("%PDF")
@@ -52,32 +95,70 @@ def extract_text_from_document(filename: str, content: Union[str, bytes]) -> str
                     pdf_bytes = content.encode("latin1", errors="ignore")
                 except Exception:
                     pdf_bytes = None
+        else:
+            return _split_non_pdf_pages(content.strip())
 
     if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
-        extracted_text = ""
-        # Try 1: pdfminer.six (robust stream extractor)
-        try:
-            from pdfminer.high_level import extract_text
-            extracted_text = extract_text(io.BytesIO(pdf_bytes))
-        except Exception as e:
-            logger.warning("pdfminer.six extraction failed for '%s': %s", filename, str(e))
-            extracted_text = ""
+        pages: List[Tuple[int, str]] = []
 
-        # Try 2: pypdf if pdfminer returned empty
-        if not extracted_text or not extracted_text.strip():
+        # Strategy 1: pdfminer.six page layout iteration
+        try:
+            from pdfminer.high_level import extract_pages
+            from pdfminer.layout import LTTextContainer
+
+            for page_layout in extract_pages(io.BytesIO(pdf_bytes)):
+                page_num = getattr(page_layout, "pageid", len(pages) + 1)
+                text_parts = []
+                for element in page_layout:
+                    if isinstance(element, LTTextContainer):
+                        text_parts.append(element.get_text())
+                page_text = _structure_tables_in_text("".join(text_parts).strip())
+                if page_text:
+                    pages.append((page_num, page_text))
+        except Exception as e:
+            logger.warning("pdfminer.six page extraction failed for '%s': %s", filename, str(e))
+            pages = []
+
+        # Strategy 2: pypdf fallback if pdfminer extracted nothing
+        if not pages:
             try:
                 import pypdf
+
                 reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
-                pages = [p.extract_text() for p in reader.pages if p.extract_text()]
-                extracted_text = "\n\n".join(pages)
+                for idx, page in enumerate(reader.pages):
+                    raw = page.extract_text() or ""
+                    page_text = _structure_tables_in_text(raw.strip())
+                    if page_text:
+                        pages.append((idx + 1, page_text))
             except Exception as e:
-                logger.warning("pypdf extraction failed for '%s': %s", filename, str(e))
+                logger.warning("pypdf page extraction failed for '%s': %s", filename, str(e))
 
-        if extracted_text and extracted_text.strip():
-            logger.info("Successfully extracted %d characters from PDF '%s'", len(extracted_text), filename)
-            return extracted_text.strip()
+        if pages:
+            logger.info("Successfully extracted %d page(s) from PDF '%s'", len(pages), filename)
+            return pages
 
-    # Return plain text or cleaned text
-    if isinstance(content, bytes):
-        return content.decode("utf-8", errors="replace").strip()
-    return content.strip()
+    # Fallback for plain text or failed PDF decode
+    fallback_text = content.decode("utf-8", errors="replace").strip() if isinstance(content, bytes) else content.strip()
+    return _split_non_pdf_pages(fallback_text)
+
+
+def _split_non_pdf_pages(text: str) -> List[Tuple[int, str]]:
+    """Split non-PDF text on standard form-feed characters if present, else return single page 1."""
+    if not text:
+        return []
+    if "\x0c" in text:
+        parts = [p.strip() for p in text.split("\x0c") if p.strip()]
+        if parts:
+            return [(idx + 1, _structure_tables_in_text(p)) for idx, p in enumerate(parts)]
+    return [(1, _structure_tables_in_text(text))]
+
+
+def extract_text_from_document(filename: str, content: Union[str, bytes]) -> str:
+    """
+    Extract readable plain text from attached document content.
+    Backward-compatible wrapper that joins all extracted pages.
+    """
+    pages = extract_pages_from_document(filename, content)
+    if not pages:
+        return ""
+    return "\n\n".join(page_text for _, page_text in pages).strip()

@@ -34,7 +34,12 @@ class RetrievalService:
             raise RetrievalError("min_similarity must be between -1.0 and 1.0.")
 
         try:
-            query_embedding = await self.embedding_provider.embed(query)
+            try:
+                query_embedding = await self.embedding_provider.embed(
+                    query, task_type="RETRIEVAL_QUERY"
+                )
+            except TypeError:
+                query_embedding = await self.embedding_provider.embed(query)
             if document_ids is not None:
                 chunks = await self.repository.similarity_search(
                     query_embedding, top_k, document_ids=document_ids

@@ -50,9 +50,10 @@ class KnowledgeRepository(ABC):
 class InMemoryKnowledgeRepository(KnowledgeRepository):
     """Deterministic in-memory repository for tests and local development."""
 
-    def __init__(self) -> None:
+    def __init__(self, expected_dimensions: Optional[int] = None) -> None:
         self.documents: Dict[str, KnowledgeDocument] = {}
         self.chunks: Dict[str, StoredKnowledgeChunk] = {}
+        self.expected_dimensions = expected_dimensions
 
     async def has_document(self, document_id: str) -> bool:
         """Check whether a document is already stored in-memory."""
@@ -81,6 +82,10 @@ class InMemoryKnowledgeRepository(KnowledgeRepository):
                 raise KnowledgeRepositoryError("Chunk document ID does not match the stored document.")
             if not embedding:
                 raise KnowledgeRepositoryError("Embeddings cannot be empty.")
+            if self.expected_dimensions is not None and len(embedding) != self.expected_dimensions:
+                raise KnowledgeRepositoryError(
+                    f"Expected {self.expected_dimensions} embedding dimensions, got {len(embedding)}."
+                )
             if chunk.id in self.chunks:
                 raise KnowledgeRepositoryError(f"Chunk '{chunk.id}' is already stored.")
 

@@ -10,10 +10,13 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from app.knowledge.chunking import FixedSizeTextChunker
+from app.knowledge.chunking import Chunker, StructureAwareChunker
 from app.knowledge.embeddings import EmbeddingProvider
 from app.knowledge.models import DocumentChunk, KnowledgeDocument
-from app.knowledge.pdf_extractor import extract_text_from_document
+from app.knowledge.pdf_extractor import (
+    extract_pages_from_document,
+    extract_text_from_document,
+)
 from app.knowledge.repository import KnowledgeRepository
 from app.logging_config import get_logger
 
@@ -114,6 +117,7 @@ class DocumentService:
         self,
         repository: KnowledgeRepository,
         embedding_provider: EmbeddingProvider,
+        chunker: Chunker | None = None,
         chunk_size: int = 1200,
         chunk_overlap: int = 120,
         embedding_batch_size: int = 32,
@@ -121,7 +125,7 @@ class DocumentService:
     ):
         self.repository = repository
         self.embedding_provider = embedding_provider
-        self.chunker = FixedSizeTextChunker(chunk_size=chunk_size, overlap=chunk_overlap)
+        self.chunker = chunker or StructureAwareChunker()
         self.embedding_batch_size = max(1, embedding_batch_size)
         self.embedding_rate_limit_delay = embedding_rate_limit_delay_seconds
 
@@ -235,16 +239,21 @@ class DocumentService:
                 )
             )
 
-            clean_text = await asyncio.to_thread(extract_text_from_document, filename, file_bytes)
-            if not clean_text or not clean_text.strip():
+            pages = await asyncio.to_thread(extract_pages_from_document, filename, file_bytes)
+            if not pages:
                 raise RuntimeError(f"No extractable text found in '{filename}'.")
+            clean_text = "\n\n".join(page_text for _, page_text in pages).strip()
 
             # 2. Chunking
+            doc_meta: Dict[str, Any] = {"pages": pages}
+            if label:
+                doc_meta["label"] = label
+
             knowledge_doc = KnowledgeDocument(
                 id=doc_id,
                 source=filename,
                 content=clean_text,
-                metadata={"label": label} if label else {},
+                metadata=doc_meta,
             )
             chunks = self.chunker.chunk(knowledge_doc)
             total_chunks = len(chunks)
@@ -263,13 +272,15 @@ class DocumentService:
                 )
             )
 
-            # 3. Rate-limited and batched embedding
+            # 3. Rate-limited and batched embedding with RETRIEVAL_DOCUMENT task type
             all_embeddings: List[List[float]] = []
-            chunk_texts = [c.content for c in chunks]
+            chunk_texts = [c.metadata.get("embedding_text", c.content) for c in chunks]
 
             for i in range(0, total_chunks, self.embedding_batch_size):
                 batch = chunk_texts[i : i + self.embedding_batch_size]
-                batch_vectors = await self.embedding_provider.embed_many(batch)
+                batch_vectors = await self.embedding_provider.embed_many(
+                    batch, task_type="RETRIEVAL_DOCUMENT"
+                )
                 all_embeddings.extend(batch_vectors)
 
                 metadata.embedded_chunk_count = len(all_embeddings)
