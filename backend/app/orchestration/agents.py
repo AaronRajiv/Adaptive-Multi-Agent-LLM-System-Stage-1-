@@ -10,6 +10,7 @@ from app.agents.researcher import ResearchAgent
 from app.knowledge.models import RetrievedContext
 from app.models.schemas import ResearchResult
 from app.models.task_graph import TaskNode
+from app.orchestration.evidence_ledger import EvidenceLedger
 
 
 class TaskExecutionResult(BaseModel):
@@ -29,6 +30,7 @@ class TaskExecutionContext(BaseModel):
     input_context: Dict[str, Any] = Field(default_factory=dict)
     dependency_results: Dict[str, TaskExecutionResult] = Field(default_factory=dict)
     retrieved_context: RetrievedContext | None = None
+    evidence_ledger: EvidenceLedger | None = None
 
 
 class TaskExecutionAgent(ABC):
@@ -75,6 +77,8 @@ class ResearchTaskAgent(TaskExecutionAgent):
         metadata: Dict[str, Any] = {"research_result": result.model_dump()}
         if context.retrieved_context:
             metadata["retrieved_context"] = context.retrieved_context.model_dump()
+            if context.evidence_ledger is not None:
+                context.evidence_ledger.add_chunks(context.retrieved_context.chunks)
 
         return TaskExecutionResult(
             task_id=context.task.id,
@@ -85,7 +89,7 @@ class ResearchTaskAgent(TaskExecutionAgent):
 
 
 class AnalysisTaskAgent(TaskExecutionAgent):
-    """Adapter that gives the existing AnalystAgent completed dependency findings and optional RAG."""
+    """Adapter that gives the existing AnalystAgent completed dependency findings, evidence ledger, and optional RAG."""
 
     def __init__(self, agent: AnalystAgent):
         self.agent = agent
@@ -101,7 +105,10 @@ class AnalysisTaskAgent(TaskExecutionAgent):
             for task_id, result in context.dependency_results.items()
         ]
         analysis = await self.agent.analyze(
-            user_task, research_results, retrieved_context=context.retrieved_context
+            user_task,
+            research_results,
+            retrieved_context=context.retrieved_context,
+            evidence_ledger=context.evidence_ledger,
         )
         metadata: Dict[str, Any] = {}
         if context.retrieved_context:

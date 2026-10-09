@@ -18,6 +18,7 @@ from app.orchestration.agents import (
     TaskExecutionContext,
     TaskExecutionResult,
 )
+from app.orchestration.evidence_ledger import EvidenceLedger
 
 
 class GraphExecutionStatus(str, Enum):
@@ -36,6 +37,7 @@ class GraphExecutionResult(BaseModel):
     graph: TaskGraph | None
     task_results: Dict[str, TaskExecutionResult] = Field(default_factory=dict)
     execution_trace: List[TaskExecutionTrace] = Field(default_factory=list)
+    evidence_ledger: EvidenceLedger = Field(default_factory=EvidenceLedger)
     error: str | None = None
 
 
@@ -58,6 +60,7 @@ class Orchestrator:
         max_concurrency: int = 4,
         retrieval_service: RetrievalService | None = None,
         event_bus: Optional[RunEventBus] = None,
+        evidence_ledger: Optional[EvidenceLedger] = None,
     ):
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be at least 1.")
@@ -65,6 +68,7 @@ class Orchestrator:
         self.max_concurrency = max_concurrency
         self.retrieval_service = retrieval_service
         self.event_bus = event_bus
+        self.evidence_ledger = evidence_ledger if evidence_ledger is not None else EvidenceLedger()
 
     async def execute(
         self, graph: TaskGraph, input_context: Dict[str, Any] | None = None
@@ -120,6 +124,7 @@ class Orchestrator:
                 graph=graph,
                 task_results=results,
                 execution_trace=trace,
+                evidence_ledger=self.evidence_ledger,
             )
 
     async def _prepare_task_for_execution(self, task: TaskNode) -> None:
@@ -149,11 +154,15 @@ class Orchestrator:
                     dependency_id: results[dependency_id] for dependency_id in task.dependencies
                 }
                 retrieved_context = await self._retrieve_context_for_task(task, input_context=input_context)
+                if retrieved_context and retrieved_context.chunks:
+                    self.evidence_ledger.add_chunks(retrieved_context.chunks)
+
                 execution_context = TaskExecutionContext(
                     task=task,
                     input_context=input_context,
                     dependency_results=dependency_results,
                     retrieved_context=retrieved_context,
+                    evidence_ledger=self.evidence_ledger,
                 )
                 result = await agent.execute(execution_context)
                 if result.task_id != task.id:

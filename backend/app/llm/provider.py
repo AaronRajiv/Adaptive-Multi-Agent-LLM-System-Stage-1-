@@ -28,6 +28,44 @@ logger = get_logger("app.llm.provider")
 T = TypeVar("T", bound=BaseModel)
 
 
+def pydantic_to_gemini_schema(schema_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Convert a Pydantic V2 model JSON schema ($defs, anyOf, etc.) into
+    a clean, inlined OpenAPI 3.0 schema compatible with Gemini REST API responseSchema.
+    """
+    defs = schema_dict.get("$defs", {})
+
+    def resolve(node: Any) -> Any:
+        if not isinstance(node, dict):
+            return node
+        if "$ref" in node:
+            ref_path = node["$ref"].split("/")[-1]
+            if ref_path in defs:
+                return resolve(dict(defs[ref_path]))
+        if "anyOf" in node:
+            # Pick non-null variant
+            non_null = [s for s in node["anyOf"] if s.get("type") != "null"]
+            if non_null:
+                return resolve(non_null[0])
+            return resolve(node["anyOf"][0])
+
+        res: Dict[str, Any] = {}
+        for k, v in node.items():
+            if k in ("$defs", "$ref", "title", "default", "minItems", "additionalProperties"):
+                continue
+            if k == "type":
+                res["type"] = str(v).upper()
+            elif k == "properties" and isinstance(v, dict):
+                res["properties"] = {pk: resolve(pv) for pk, pv in v.items()}
+            elif k == "items":
+                res["items"] = resolve(v)
+            elif k in ("required", "description", "enum"):
+                res[k] = v
+        return res
+
+    return resolve(dict(schema_dict))
+
+
 class MockLLMProvider(LLMProvider):
     """
     Mock LLM Provider for unit testing and offline development.
@@ -42,31 +80,33 @@ class MockLLMProvider(LLMProvider):
         if "generate" in self.custom_responses:
             return str(self.custom_responses["generate"])
 
-        # Context-based mock text generation
-        if "Analyst Agent" in (system_prompt or ""):
+        sys_str = (system_prompt or "").lower()
+        if "analyst" in sys_str:
             return (
                 "### Synthesized Analytical Assessment\n\n"
-                "Based on the collected research, here is a structured synthesis:\n"
-                "1. **Cost & Financial Factors**: Initial investment varies significantly, with running costs offsetting upfront premiums over time.\n"
-                "2. **Operational Practicality**: User suitability depends on daily infrastructure access and maintenance overhead.\n"
-                "3. **Long-Term Implications**: Environmental and policy benefits present compelling incentives.\n\n"
+                "Based on the collected research and evidence ledger, here is a structured synthesis:\n"
+                "1. **Cost & Financial Factors**: Initial investment varies significantly, with running costs offsetting upfront premiums over time [FIA 2025, art 3.4.1, p.24].\n"
+                "2. **Operational Practicality**: User suitability depends on daily infrastructure access and maintenance overhead [FIA 2025, art 10.2, p.112].\n"
+                "3. **Cross-System Trade-offs**: Aerodynamic load limits directly interact with suspension stiffness [FIA 2025, art 3.10, p.45] and [FIA 2025, art 10.1, p.110].\n\n"
                 "**Conclusion**: The optimal choice is contingent on specific user constraints and localized infrastructure."
             )
-        elif "Synthesizer Agent" in (system_prompt or ""):
+        elif "synthesizer" in sys_str:
             return (
-                "### Final Comprehensive Evaluation & Recommendation\n\n"
-                "After decomposing the task, executing targeted research subtasks, synthesizing findings, and passing evaluation quality checks, the comprehensive result is as follows:\n\n"
-                "- **Key Finding 1**: Upfront acquisition expenses vs operational efficiency require balanced budgeting.\n"
-                "- **Key Finding 2**: Practical everyday usability is strongly correlated with available supporting infrastructure.\n"
-                "- **Key Finding 3**: Environmental and sustainability considerations favor modern alternatives.\n\n"
-                "**Final Guidance**: Tailor the decision to your specific financial horizon and daily operational requirements."
+                "### Explicit Regulatory Requirements\n"
+                "- Article 3.4.1 prescribes the overall dimensional envelope boundaries [FIA 2025, art 3.4.1, p.24].\n"
+                "- Article 4.1 establishes the minimum mass specification of 798 kg [FIA 2025, art 4.1, p.38].\n\n"
+                "### Engineering Interpretation / Inference\n"
+                "- Aerodynamic balance shifts dynamically under braking, requiring balanced mechanical suspension compensation [INFERENCE].\n"
+                "- Packaging constraints in the sidepod area influence cooling efficiency and airflow toward the diffuser [INFERENCE].\n\n"
+                "### Limitations and Unknowns\n"
+                "- Specific aerodynamic elasticity deflection measurements outside standard test load conditions are not detailed in the available text."
             )
-        elif "Research Agent" in (system_prompt or ""):
+        elif "research" in sys_str:
             return (
-                "Parametric Knowledge Findings:\n"
-                "- Factual overview indicates significant divergence across key comparison criteria.\n"
-                "- Maintenance requirements and operating costs scale proportionally with usage intensity.\n"
-                "- Environmental lifecycle analysis highlights distinct trade-offs between manufacturing vs operational phases."
+                "Grounding Research Findings:\n"
+                "- [EXPLICIT] Dimensional requirements mandate strict envelope boundaries [FIA 2025, art 3.4.1, p.24].\n"
+                "- [INFERENCE] Reducing front wing chord shifts aerodynamic balance rearward [FIA 2025, art 3.10, p.45].\n"
+                "- [NOT_IN_SOURCE] Standard track setup procedures involve adjusting roll bar stiffness accordingly."
             )
         return "Mock response generated for prompt: " + prompt[:60] + "..."
 
@@ -77,27 +117,56 @@ class MockLLMProvider(LLMProvider):
             return schema.model_validate(self.custom_responses["structured"])
 
         if schema == PlannerOutput:
+            has_rag = any(
+                term in prompt.lower()
+                for term in [
+                    "document", "knowledge base", "retrieval", "pdf", "rules", "regulations",
+                    "article", "fia", "report", "solar", "sources", "chunks", "attached",
+                ]
+            )
             mock_data = {
                 "tasks": [
                     {
                         "id": "T1",
                         "description": "Analyze acquisition and initial setup costs",
                         "type": "research",
+                        **({"metadata": {
+                            "domain": "financial",
+                            "retrieval_queries": ["initial acquisition costs capital expense", "setup fees"],
+                            "retrieval_query": "initial acquisition costs capital expense",
+                        }} if has_rag else {}),
                     },
                     {
                         "id": "T2",
                         "description": "Examine operational, maintenance, and running costs",
                         "type": "research",
+                        **({"metadata": {
+                            "domain": "operations",
+                            "retrieval_queries": ["operational maintenance schedules", "running costs"],
+                            "retrieval_query": "operational maintenance schedules",
+                        }} if has_rag else {}),
                     },
                     {
                         "id": "T3",
                         "description": "Evaluate environmental and sustainability impact",
                         "type": "research",
+                        **({"metadata": {
+                            "domain": "environmental",
+                            "retrieval_queries": ["environmental lifecycle emissions", "carbon footprint"],
+                            "retrieval_query": "environmental lifecycle emissions",
+                        }} if has_rag else {}),
                     },
                     {
                         "id": "T4",
+                        "description": "Cross-system interaction: Evaluate financial vs operational trade-offs",
+                        "type": "analysis",
+                        "dependencies": ["T1", "T2"],
+                    },
+                    {
+                        "id": "T5",
                         "description": "Synthesize overall feasibility and user suitability",
                         "type": "analysis",
+                        "dependencies": ["T3", "T4"],
                     },
                 ]
             }
@@ -141,6 +210,7 @@ class GeminiProvider(LLMProvider):
     """
     Google Gemini API Provider implementation.
     Calls Google Generative Language REST API directly using httpx.
+    Supports native systemInstruction, responseMimeType, and responseSchema.
     """
 
     def __init__(self, api_key: str, model: str = "gemini-1.5-flash"):
@@ -155,7 +225,6 @@ class GeminiProvider(LLMProvider):
     def _clean_json_markdown(self, text: str) -> str:
         """Extract and clean raw JSON from markdown code fences if present."""
         text = text.strip()
-        # Look for ```json ... ``` or ``` ... ```
         match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
         if match:
             return match.group(1).strip()
@@ -164,29 +233,18 @@ class GeminiProvider(LLMProvider):
     async def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         url = f"{self.base_url}/{self.model}:generateContent"
 
-        contents = []
-        if system_prompt:
-            contents.append({
-                "role": "user",
-                "parts": [{"text": f"[System Instructions]: {system_prompt}\n\nPlease acknowledge."}]
-            })
-            contents.append({
-                "role": "model",
-                "parts": [{"text": "Understood. I will strictly follow these instructions."}]
-            })
-
-        contents.append({
-            "role": "user",
-            "parts": [{"text": prompt}]
-        })
-
-        payload = {
+        contents = [{"role": "user", "parts": [{"text": prompt}]}]
+        payload: Dict[str, Any] = {
             "contents": contents,
             "generationConfig": {
                 "temperature": 0.2,
                 "topP": 0.95,
-            }
+            },
         }
+        if system_prompt:
+            payload["systemInstruction"] = {
+                "parts": [{"text": system_prompt}]
+            }
 
         max_retries = 3
         backoff = 2.0
@@ -200,7 +258,7 @@ class GeminiProvider(LLMProvider):
                         headers={
                             "Content-Type": "application/json",
                             "x-goog-api-key": self.api_key,
-                        }
+                        },
                     )
 
                 if response.status_code in (429, 503):
@@ -239,7 +297,6 @@ class GeminiProvider(LLMProvider):
                     logger.error("Gemini API returned empty response parts.")
                     raise LLMProviderError("Gemini API returned an empty response body.")
 
-                # Filter and join all text parts (supporting reasoning/thinking parts)
                 text_parts = [p.get("text", "") for p in parts if "text" in p and p.get("text")]
                 if not text_parts:
                     logger.error("Gemini API candidate contained no text content.")
@@ -259,22 +316,96 @@ class GeminiProvider(LLMProvider):
     async def generate_structured(
         self, prompt: str, schema: Type[T], system_prompt: Optional[str] = None
     ) -> T:
-        schema_json = json.dumps(schema.model_json_schema(), indent=2)
-        structured_instruction = (
-            f"You MUST output ONLY valid JSON matching the following JSON schema.\n"
-            f"Do not include any explanation or extra text outside the JSON block.\n\n"
-            f"JSON Schema:\n{schema_json}\n\n"
-            f"Task Prompt:\n{prompt}"
-        )
+        """
+        Generate structured output using native Gemini responseMimeType='application/json'
+        and responseSchema, with fallback parsing if needed.
+        """
+        url = f"{self.base_url}/{self.model}:generateContent"
 
-        full_system_prompt = system_prompt or "You are a precise, structured data generation agent."
-        raw_text = await self.generate(structured_instruction, system_prompt=full_system_prompt)
-
-        cleaned_json_text = self._clean_json_markdown(raw_text)
-
+        gemini_schema = None
         try:
-            parsed_data = json.loads(cleaned_json_text)
-            return schema.model_validate(parsed_data)
+            gemini_schema = pydantic_to_gemini_schema(schema.model_json_schema())
+        except Exception as exc:
+            logger.warning("Failed to convert Pydantic schema to Gemini responseSchema: %s", exc)
+
+        generation_config: Dict[str, Any] = {
+            "temperature": 0.1,
+            "topP": 0.95,
+            "responseMimeType": "application/json",
+        }
+        if gemini_schema:
+            generation_config["responseSchema"] = gemini_schema
+
+        contents = [{"role": "user", "parts": [{"text": prompt}]}]
+        payload: Dict[str, Any] = {
+            "contents": contents,
+            "generationConfig": generation_config,
+        }
+        if system_prompt:
+            payload["systemInstruction"] = {
+                "parts": [{"text": system_prompt}]
+            }
+
+        max_retries = 3
+        backoff = 2.0
+        raw_text = ""
+
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    response = await client.post(
+                        url,
+                        json=payload,
+                        headers={
+                            "Content-Type": "application/json",
+                            "x-goog-api-key": self.api_key,
+                        },
+                    )
+
+                # If schema rejected with 400 (e.g. unsupported schema construct), retry without responseSchema
+                if response.status_code == 400 and "responseSchema" in payload.get("generationConfig", {}):
+                    logger.warning("Gemini rejected responseSchema (HTTP 400). Retrying without responseSchema...")
+                    payload["generationConfig"].pop("responseSchema", None)
+                    schema_json = json.dumps(schema.model_json_schema(), indent=2)
+                    payload["contents"][0]["parts"][0]["text"] = (
+                        f"You MUST output ONLY valid JSON matching this schema:\n{schema_json}\n\nTask:\n{prompt}"
+                    )
+                    continue
+
+                if response.status_code in (429, 503):
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(backoff)
+                        backoff *= 2
+                        continue
+
+                if response.status_code != 200:
+                    err_msg = response.text
+                    try:
+                        err_msg = response.json().get("error", {}).get("message", err_msg)
+                    except Exception:
+                        pass
+                    raise LLMProviderError(f"Gemini API structured call failed (HTTP {response.status_code}): {err_msg}")
+
+                res_data = response.json()
+                candidates = res_data.get("candidates", [])
+                if not candidates:
+                    raise LLMProviderError("Gemini API returned no candidates.")
+                parts = candidates[0].get("content", {}).get("parts", [])
+                text_parts = [p.get("text", "") for p in parts if "text" in p and p.get("text")]
+                raw_text = "".join(text_parts).strip()
+                break
+
+            except httpx.RequestError as exc:
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(backoff)
+                    backoff *= 2
+                    continue
+                raise LLMProviderError(f"Network error during structured call: {exc}")
+
+        cleaned = self._clean_json_markdown(raw_text)
+        try:
+            parsed = json.loads(cleaned)
+            return schema.model_validate(parsed)
         except (json.JSONDecodeError, ValidationError) as err:
             raise LLMStructuredOutputError(
                 f"Failed to parse structured model response as {schema.__name__}: {str(err)}\n"

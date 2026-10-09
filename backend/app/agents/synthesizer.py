@@ -8,21 +8,22 @@ the original task, research findings, analytical synthesis, and evaluation feedb
 from typing import List, Optional
 from app.llm.base import LLMProvider
 from app.models.schemas import ChatMessagePayload, EvaluationResult, ResearchResult
+from app.orchestration.evidence_ledger import EvidenceLedger
 
-SYNTHESIZER_SYSTEM_PROMPT = """You are the FINAL SYNTHESIZER AGENT in an adaptive multi-agent system.
-Your responsibility is to produce the definitive, user-facing answer addressing the user's task.
-
-Inputs available to you:
-1. Original User Task & Conversation History
-2. Key Findings from Research Agents
-3. Analysis from the Analyst Agent
-4. Critique and Quality Score from the Evaluator Agent
+SYNTHESIZER_SYSTEM_PROMPT = """You are the SYNTHESIZER AGENT in an adaptive multi-agent system.
+Your responsibility is to produce a rigorous, grounded, user-facing answer addressing the user's task.
 
 Rules:
-1. Deliver a clear, polished, and task-appropriate response.
-2. Address the user's intent directly.
-3. Format your output naturally according to what the task warrants. Do NOT force corporate report headings (such as 'Executive Summary', 'Findings', or 'Conclusion') onto direct answers, simple explanations, content drafting, or conversational questions. Use Markdown structure only when requested or when presenting complex multi-part analyses.
-4. Keep the tone helpful, professional, and aligned with conversation history.
+1. CITATION PRESERVATION: You MUST preserve all citations in brackets `[doc, art X.Y.Z, p.N]` for every regulatory requirement and factual claim.
+2. MANDATORY SECTIONS FOR REGULATORY / TECHNICAL ANALYSIS:
+   When answering questions involving technical regulations or documents, structure your response with the following explicit sections:
+   - `### Explicit Regulatory Requirements`: Strict factual requirements, dimensional bounds, and mandatory constraints explicitly stated in the source regulations, cited with `[doc, art X.Y.Z, p.N]`.
+   - `### Engineering Interpretation / Inference`: Engineering trade-offs, mechanical/aerodynamic interactions, and packaging implications logically deduced from the regulations, clearly designated as inferences.
+   - `### Limitations and Unknowns`: Ambiguities, gaps where regulations do not specify implementation details, or information missing from the supplied evidence.
+3. NO UNGROUNDED QUANTIFICATION OF LAP-TIME GAINS:
+   You MUST NOT quantify lap-time gains (such as "gains 0.3 seconds per lap" or "worth half a second") UNLESS the supplied source text explicitly specifies that numerical figure. If the source does not provide a lap-time number, discuss performance effects strictly qualitatively.
+4. NO AUTHORITATIVE / DEFINITIVE WORDING:
+   Do NOT use words like "definitive", "authoritative", "indisputable", or "absolute". Frame findings with technical objectivity and precision based on the supplied evidence.
 """
 
 
@@ -38,6 +39,7 @@ class SynthesizerAgent:
         research_results: List[ResearchResult],
         analysis: str,
         evaluation: EvaluationResult,
+        evidence_ledger: Optional[EvidenceLedger] = None,
         history: Optional[List[ChatMessagePayload]] = None,
     ) -> str:
         """
@@ -48,6 +50,7 @@ class SynthesizerAgent:
             research_results: List of ResearchResult objects.
             analysis: The analytical synthesis from AnalystAgent.
             evaluation: The EvaluationResult from EvaluatorAgent.
+            evidence_ledger: Optional shared canonical Evidence Ledger.
             history: Optional conversation history.
 
         Returns:
@@ -63,14 +66,21 @@ class SynthesizerAgent:
             turns = [f"{msg.role.capitalize()}: {msg.content}" for msg in history]
             history_text = "Prior Conversation History:\n" + "\n".join(turns) + "\n\n"
 
+        ledger_text = ""
+        if evidence_ledger is not None and len(evidence_ledger) > 0:
+            ledger_text = f"\n\nGrounding Evidence Ledger Citations:\n{', '.join(evidence_ledger.all_citations())}\n"
+
         prompt = (
             f"{history_text}"
             f"Current User Task:\n\"{user_task.strip()}\"\n\n"
             f"Collected Research Subtasks & Findings:\n{research_summary}\n\n"
-            f"Analyst Agent Findings:\n{analysis}\n\n"
+            f"Analyst Agent Findings:\n{analysis}\n"
+            f"{ledger_text}\n"
             f"Evaluator Score: {evaluation.score}/100 (Status: {evaluation.status})\n"
             f"Evaluator Feedback:\n{evaluation.feedback}\n\n"
-            f"Please generate the definitive, final user-facing response addressing the current task in light of all evidence and history."
+            f"Please generate the grounded, user-facing response following the mandatory section structure: "
+            f"'### Explicit Regulatory Requirements', '### Engineering Interpretation / Inference', and '### Limitations and Unknowns'. "
+            f"Preserve all citations and do not quantify lap-time gains unless the text explicitly states them."
         )
 
         final_response = await self.llm.generate(

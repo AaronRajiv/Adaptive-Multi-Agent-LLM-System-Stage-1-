@@ -37,6 +37,7 @@ from app.orchestration.agents import (
     CapabilityRegistry,
     ResearchTaskAgent,
 )
+from app.orchestration.evidence_ledger import EvidenceLedger
 from app.orchestration.orchestrator import GraphExecutionStatus, Orchestrator
 from app.logging_config import get_logger
 from app.orchestration.strategy import ExecutionStrategy, StrategySelector
@@ -442,11 +443,13 @@ class OrchestratedPipeline:
             metadata={"task_ids": task_ids},
         )
 
+        evidence_ledger = EvidenceLedger()
         orchestrator = Orchestrator(
             registry=self.registry,
             max_concurrency=self.max_concurrency,
             retrieval_service=self.retrieval_service,
             event_bus=self.event_bus,
+            evidence_ledger=evidence_ledger,
         )
 
         t_orch = time.perf_counter()
@@ -471,11 +474,15 @@ class OrchestratedPipeline:
                         retrieved_chunks_collected.append(RetrievedChunk(**chunk_dict))
 
             if task.type == TaskType.RESEARCH and result.success:
+                res_metadata = result.metadata.get("research_result", {}) if result.metadata else {}
                 research_results.append(
                     ResearchResult(
                         subtask_id=task.id,
                         subtask_description=task.description,
                         findings=str(result.output or ""),
+                        citations=res_metadata.get("citations", []),
+                        chunk_ids=res_metadata.get("chunk_ids", []),
+                        missing_evidence=res_metadata.get("missing_evidence"),
                     )
                 )
             elif task.type == TaskType.ANALYSIS and result.success:
@@ -507,7 +514,9 @@ class OrchestratedPipeline:
                 t.duration_ms for t in exec_result.execution_trace if t.capability == "analysis"
             )
         else:
-            analysis_text = await self.analyst.analyze(user_task, research_results)
+            analysis_text = await self.analyst.analyze(
+                user_task, research_results, evidence_ledger=evidence_ledger
+            )
             analysis_dur = round((time.perf_counter() - t_ana) * 1000, 2)
 
         traces.append(
@@ -574,8 +583,14 @@ class OrchestratedPipeline:
                     retrieved_context=rc,
                 )
                 r.findings = re_research.findings
+                if re_research.citations:
+                    r.citations = re_research.citations
+                if re_research.missing_evidence:
+                    r.missing_evidence = re_research.missing_evidence
 
-            analysis_text = await self.analyst.analyze(user_task, research_results)
+            analysis_text = await self.analyst.analyze(
+                user_task, research_results, evidence_ledger=evidence_ledger
+            )
             evaluation_output = await self.evaluator.evaluate(user_task, analysis_text)
             replan_dur = round((time.perf_counter() - t_replan) * 1000, 2)
 
@@ -598,7 +613,12 @@ class OrchestratedPipeline:
         await self._emit(ExecutionEventType.SYNTHESIS_STARTED, message="Synthesis started.")
         t_synth = time.perf_counter()
         final_answer = await self.synthesizer.synthesize(
-            user_task, research_results, analysis_text, evaluation_output, history=history
+            user_task,
+            research_results,
+            analysis_text,
+            evaluation_output,
+            evidence_ledger=evidence_ledger,
+            history=history,
         )
         synth_dur = round((time.perf_counter() - t_synth) * 1000, 2)
         traces.append(
@@ -627,6 +647,7 @@ class OrchestratedPipeline:
             task_graph=graph,
             retrieved_chunks=retrieved_chunks_collected,
             task_execution_traces=exec_result.execution_trace,
+            evidence_ledger=evidence_ledger.model_dump(),
         )
 
         record_run(response)

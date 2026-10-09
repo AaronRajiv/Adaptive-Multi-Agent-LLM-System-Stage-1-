@@ -5,7 +5,7 @@ Provides strict Pydantic models for agent inputs, outputs, validation,
 and API request/response contracts.
 """
 
-from typing import Any, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 from app.models.task_graph import TaskGraph, TaskNode
@@ -35,6 +35,9 @@ class ResearchResult(BaseModel):
     subtask_id: str = Field(..., description="ID of the research subtask")
     subtask_description: str = Field(..., description="Description of the assigned subtask")
     findings: str = Field(..., description="Parametric knowledge findings generated for this subtask")
+    citations: List[str] = Field(default_factory=list, description="Citations extracted from findings, e.g. ['[FIA 2025, art 3.4.1, p.24]']")
+    chunk_ids: List[str] = Field(default_factory=list, description="IDs of chunks referenced by findings")
+    missing_evidence: Optional[str] = Field(default=None, description="Explicit statement of missing evidence or gaps")
 
 
 class EvaluationResult(BaseModel):
@@ -153,6 +156,7 @@ class RunResponse(BaseModel):
     task_graph: Optional[TaskGraph] = Field(default=None, description="Executed TaskGraph with runtime statuses and dependencies")
     retrieved_chunks: List[Any] = Field(default_factory=list, description="All retrieved knowledge chunks with provenance")
     task_execution_traces: List[TaskExecutionTrace] = Field(default_factory=list, description="Per-task execution traces from Orchestrator")
+    evidence_ledger: Optional[Dict[str, Any]] = Field(default=None, description="Shared canonical Evidence Ledger for the run")
 
 
 class SystemStatusResponse(BaseModel):

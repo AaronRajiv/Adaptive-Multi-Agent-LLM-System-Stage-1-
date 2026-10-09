@@ -31,8 +31,17 @@ def test_real_pdf_rag_end_to_end():
         "documents": [doc_payload],
     }
 
+    import pytest
     print("Sending live API request to http://localhost:8000/api/run ...")
-    response = httpx.post("http://localhost:8000/api/run", json=request_payload, timeout=120.0)
+    try:
+        response = httpx.post("http://localhost:8000/api/run", json=request_payload, timeout=120.0)
+    except httpx.RequestError as e:
+        pytest.skip(f"Backend server is not reachable at http://localhost:8000: {e}")
+
+    if response.status_code in (429, 500) and any(
+        err_term in response.text.lower() for err_term in ["quota", "429", "rate limit", "resource_exhausted"]
+    ):
+        pytest.skip(f"Google Gemini live API quota exceeded for live integration test: {response.text}")
 
     print("HTTP Status Code:", response.status_code)
     assert response.status_code == 200, f"Error: {response.text}"

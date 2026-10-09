@@ -182,12 +182,10 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
 def get_embedding_provider(config):
     """Create the configured embedding provider without coupling retrieval to an LLM provider."""
     provider_name = config.embedding_provider.lower().strip()
-    llm_provider_name = config.llm_provider.lower().strip()
+    llm_provider_name = getattr(config, "llm_provider", "").lower().strip()
 
-    if provider_name == "mock" or llm_provider_name == "mock":
-        api_key = config.embedding_api_key or config.llm_api_key
-        if provider_name == "mock" or not api_key:
-            return MockEmbeddingProvider(dimensions=config.knowledge_embedding_dimensions)
+    if provider_name == "mock" or (llm_provider_name == "mock" and not getattr(config, "embedding_api_key", None)):
+        return MockEmbeddingProvider(dimensions=config.knowledge_embedding_dimensions)
 
     if provider_name == "gemini":
         api_key = config.embedding_api_key or config.llm_api_key
