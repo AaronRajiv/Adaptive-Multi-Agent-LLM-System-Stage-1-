@@ -24,6 +24,9 @@ from app.models.schemas import (
 from app.pipeline.orchestrated_pipeline import OrchestratedPipeline
 from app.pipeline.baseline_pipeline import get_recent_runs
 from app.knowledge.repository import InMemoryKnowledgeRepository, KnowledgeRepository
+from app.logging_config import get_logger
+
+logger = get_logger("app.api.routes")
 
 
 def get_shared_knowledge_repository() -> KnowledgeRepository:
@@ -103,6 +106,7 @@ async def run_pipeline(request: RunRequest) -> RunResponse:
 
     import uuid
     run_id = request.run_id or str(uuid.uuid4())
+    logger.info("Starting pipeline execution for run_id=%s, task='%s'", run_id, task_text[:100])
     event_bus = await event_bus_registry.get_or_create(run_id)
 
     # 3. Run Orchestrated Pipeline (Stage 2-5 Graph + Orchestrator)
@@ -120,8 +124,10 @@ async def run_pipeline(request: RunRequest) -> RunResponse:
             documents=request.documents,
             history=request.history,
         )
+        logger.info("Pipeline completed successfully for run_id=%s, strategy=%s", run_id, result.execution_strategy)
         return result
     except LLMStructuredOutputError as e:
+        logger.error("Structured output validation failed for run_id=%s: %s", run_id, str(e))
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={
@@ -130,6 +136,7 @@ async def run_pipeline(request: RunRequest) -> RunResponse:
             },
         )
     except LLMProviderError as e:
+        logger.error("LLM provider error for run_id=%s: %s", run_id, str(e))
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={
@@ -138,6 +145,7 @@ async def run_pipeline(request: RunRequest) -> RunResponse:
             },
         )
     except Exception as e:
+        logger.error("Internal pipeline error for run_id=%s: %s", run_id, str(e), exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={

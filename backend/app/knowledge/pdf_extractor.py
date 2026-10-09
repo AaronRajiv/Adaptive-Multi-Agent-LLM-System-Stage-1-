@@ -6,6 +6,10 @@ import base64
 import io
 import re
 
+from app.logging_config import get_logger
+
+logger = get_logger("app.knowledge.pdf_extractor")
+
 
 def extract_text_from_document(filename: str, content: str) -> str:
     """
@@ -43,7 +47,8 @@ def extract_text_from_document(filename: str, content: str) -> str:
             try:
                 from pdfminer.high_level import extract_text
                 extracted_text = extract_text(io.BytesIO(pdf_bytes))
-            except Exception:
+            except Exception as e:
+                logger.warning("pdfminer.six extraction failed for '%s': %s", filename, str(e))
                 extracted_text = ""
 
             # Try 2: pypdf if pdfminer returned empty
@@ -53,10 +58,11 @@ def extract_text_from_document(filename: str, content: str) -> str:
                     reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
                     pages = [p.extract_text() for p in reader.pages if p.extract_text()]
                     extracted_text = "\n\n".join(pages)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("pypdf extraction failed for '%s': %s", filename, str(e))
 
             if extracted_text and extracted_text.strip():
+                logger.info("Successfully extracted %d characters from PDF '%s'", len(extracted_text), filename)
                 return extracted_text.strip()
 
     # Return plain text or cleaned text

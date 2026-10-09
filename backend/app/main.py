@@ -7,6 +7,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
 from app.config import settings
+from app.logging_config import configure_logging, get_logger
+
+# Initialize structured logging on application import
+configure_logging()
+logger = get_logger("app.main")
 
 app = FastAPI(
     title="Adaptive Multi-Agent LLM System - Stage 1 Baseline",

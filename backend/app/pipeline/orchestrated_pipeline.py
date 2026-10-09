@@ -38,8 +38,11 @@ from app.orchestration.agents import (
     ResearchTaskAgent,
 )
 from app.orchestration.orchestrator import GraphExecutionStatus, Orchestrator
+from app.logging_config import get_logger
 from app.orchestration.strategy import ExecutionStrategy, StrategySelector
 from app.pipeline.baseline_pipeline import record_run
+
+logger = get_logger("app.pipeline.orchestrated_pipeline")
 
 
 class OrchestratedPipeline:
@@ -156,6 +159,7 @@ class OrchestratedPipeline:
                 user_task, run_id, created_at, traces, has_documents=bool(documents), documents=documents, history=history
             )
         except Exception as exc:
+            logger.error("Pipeline execution failed for run_id=%s: %s", run_id, str(exc), exc_info=True)
             await self._emit(
                 ExecutionEventType.RUN_FAILED,
                 message=f"Pipeline failed: {exc}",

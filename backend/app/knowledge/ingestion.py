@@ -8,6 +8,9 @@ from app.knowledge.chunking import Chunker
 from app.knowledge.embeddings import EmbeddingProvider
 from app.knowledge.models import DocumentChunk, KnowledgeDocument
 from app.knowledge.repository import KnowledgeRepository
+from app.logging_config import get_logger
+
+logger = get_logger("app.knowledge.ingestion")
 
 
 class IngestionResult(BaseModel):
@@ -68,6 +71,15 @@ class DocumentIngestionService:
 
             await self.repository.store(document, chunks, embeddings)
             total_duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            logger.info(
+                "Ingested document '%s' (%d chars, %d chunks, %d batches) in %.2fms (embeddings %.2fms)",
+                document.id,
+                doc_char_count,
+                chunk_count,
+                batch_count,
+                total_duration_ms,
+                embed_duration_ms,
+            )
 
             return IngestionResult(
                 document_id=document.id,
@@ -80,6 +92,7 @@ class DocumentIngestionService:
                 failed=False,
             )
         except Exception as exc:
+            logger.error("Document '%s' ingestion failed: %s. Rolling back.", document.id, str(exc), exc_info=True)
             # Safe rollback: purge any partially written state so an incomplete index is not exposed
             try:
                 await self.repository.delete_document(document.id)

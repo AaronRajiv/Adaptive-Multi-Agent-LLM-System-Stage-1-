@@ -21,8 +21,10 @@ from app.llm.base import (
     LLMProviderError,
     LLMStructuredOutputError,
 )
+from app.logging_config import get_logger
 from app.models.schemas import PlannerOutput, EvaluationResult
 
+logger = get_logger("app.llm.provider")
 T = TypeVar("T", bound=BaseModel)
 
 
@@ -160,7 +162,7 @@ class GeminiProvider(LLMProvider):
         return text
 
     async def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
-        url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
+        url = f"{self.base_url}/{self.model}:generateContent"
 
         contents = []
         if system_prompt:
@@ -195,11 +197,21 @@ class GeminiProvider(LLMProvider):
                     response = await client.post(
                         url,
                         json=payload,
-                        headers={"Content-Type": "application/json"}
+                        headers={
+                            "Content-Type": "application/json",
+                            "x-goog-api-key": self.api_key,
+                        }
                     )
 
-                if response.status_code == 503 or response.status_code == 429:
+                if response.status_code in (429, 503):
                     if attempt < max_retries - 1:
+                        logger.warning(
+                            "Gemini API rate-limit or transient unavailable (HTTP %s). Backing off for %.1fs (attempt %d/%d).",
+                            response.status_code,
+                            backoff,
+                            attempt + 1,
+                            max_retries,
+                        )
                         await asyncio.sleep(backoff)
                         backoff *= 2
                         continue
@@ -211,6 +223,7 @@ class GeminiProvider(LLMProvider):
                         error_body = err_json.get("error", {}).get("message", error_body)
                     except Exception:
                         pass
+                    logger.error("Gemini API call failed (HTTP %s): %s", response.status_code, error_body)
                     raise LLMProviderError(
                         f"Gemini API error (HTTP {response.status_code}): {error_body}"
                     )
@@ -218,24 +231,29 @@ class GeminiProvider(LLMProvider):
                 res_data = response.json()
                 candidates = res_data.get("candidates", [])
                 if not candidates:
+                    logger.error("Gemini API returned no candidates.")
                     raise LLMProviderError("Gemini API returned no candidates.")
 
                 parts = candidates[0].get("content", {}).get("parts", [])
                 if not parts:
+                    logger.error("Gemini API returned empty response parts.")
                     raise LLMProviderError("Gemini API returned an empty response body.")
 
                 # Filter and join all text parts (supporting reasoning/thinking parts)
                 text_parts = [p.get("text", "") for p in parts if "text" in p and p.get("text")]
                 if not text_parts:
+                    logger.error("Gemini API candidate contained no text content.")
                     raise LLMProviderError("Gemini API candidate contained no text content.")
 
                 return "".join(text_parts).strip()
 
             except httpx.RequestError as e:
                 if attempt < max_retries - 1:
+                    logger.warning("Gemini network error: %s. Retrying in %.1fs.", str(e), backoff)
                     await asyncio.sleep(backoff)
                     backoff *= 2
                     continue
+                logger.error("Gemini network error after %d attempts: %s", max_retries, str(e))
                 raise LLMProviderError(f"Network error connecting to Gemini API: {str(e)}")
 
     async def generate_structured(

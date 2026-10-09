@@ -3,6 +3,9 @@
 from app.knowledge.embeddings import EmbeddingProvider
 from app.knowledge.models import RetrievedContext
 from app.knowledge.repository import KnowledgeRepository
+from app.logging_config import get_logger
+
+logger = get_logger("app.knowledge.retrieval")
 
 
 class RetrievalError(RuntimeError):
@@ -30,8 +33,11 @@ class RetrievalService:
             query_embedding = await self.embedding_provider.embed(query)
             chunks = await self.repository.similarity_search(query_embedding, top_k)
         except Exception as exc:
+            logger.error("Retrieval failed for query '%s': %s", query, str(exc), exc_info=True)
             raise RetrievalError(f"Retrieval failed: {exc}") from exc
 
         if min_similarity is not None:
             chunks = [chunk for chunk in chunks if chunk.similarity_score >= min_similarity]
+
+        logger.info("Retrieved %d chunk(s) for query '%s' (top_k=%d)", len(chunks), query, top_k)
         return RetrievedContext(query=query, chunks=chunks)
