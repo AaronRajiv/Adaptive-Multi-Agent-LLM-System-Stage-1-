@@ -56,12 +56,14 @@ class OrchestratedPipeline:
         settings: Settings,
         knowledge_repository: Optional[KnowledgeRepository] = None,
         retrieval_service: Optional[RetrievalService] = None,
+        document_service: Optional[Any] = None,
         max_concurrency: int = 4,
         event_bus: Optional[RunEventBus] = None,
         run_id: Optional[str] = None,
     ):
         self.llm = llm_provider
         self.settings = settings
+        self.document_service = document_service
         self.max_concurrency = max_concurrency
         self.event_bus = event_bus
         self.run_id = run_id
@@ -76,7 +78,6 @@ class OrchestratedPipeline:
         self.evaluator = EvaluatorAgent(self.llm, pass_threshold=settings.evaluator_pass_threshold)
         self.synthesizer = SynthesizerAgent(self.llm)
 
-        # Retrieval Service Setup
         # Retrieval Service Setup
         self._retrieval_init_error: Optional[str] = None
         if retrieval_service is not None:
@@ -100,6 +101,7 @@ class OrchestratedPipeline:
         self,
         user_task: str,
         documents: Optional[List[Any]] = None,
+        document_ids: Optional[List[str]] = None,
         history: Optional[List[Any]] = None,
     ) -> RunResponse:
         """
@@ -115,7 +117,33 @@ class OrchestratedPipeline:
 
         await self._emit(ExecutionEventType.RUN_STARTED, message=f"Pipeline started for task: {user_task[:100]}")
 
-        # Validate and ingest attached documents if present
+        effective_doc_ids: List[str] = list(document_ids or [])
+
+        # Validate pre-ingested document_ids if provided
+        if document_ids:
+            if not self.retrieval_service:
+                reason = self._retrieval_init_error or "Retrieval service is not configured or failed to initialize"
+                err_msg = f"Document IDs {document_ids} were provided but retrieval service is not available ({reason})."
+                logger.error(err_msg)
+                await self._emit(ExecutionEventType.RUN_FAILED, message=err_msg)
+                raise RuntimeError(err_msg)
+
+            if getattr(self, "document_service", None) is not None:
+                for doc_id in document_ids:
+                    meta = self.document_service.get_document(doc_id)
+                    if not meta:
+                        err_msg = f"Referenced document '{doc_id}' does not exist."
+                        logger.error(err_msg)
+                        await self._emit(ExecutionEventType.RUN_FAILED, message=err_msg)
+                        raise RuntimeError(err_msg)
+                    if getattr(meta, "status", None) and str(meta.status.value if hasattr(meta.status, "value") else meta.status) != "ready":
+                        status_str = meta.status.value if hasattr(meta.status, "value") else str(meta.status)
+                        err_msg = f"Referenced document '{doc_id}' is not ready (status: '{status_str}'). Refusing to run."
+                        logger.error(err_msg)
+                        await self._emit(ExecutionEventType.RUN_FAILED, message=err_msg)
+                        raise RuntimeError(err_msg)
+
+        # Validate and ingest attached legacy documents if present
         if documents:
             if not self.retrieval_service:
                 reason = self._retrieval_init_error or "Retrieval service is not configured or failed to initialize"
@@ -145,9 +173,10 @@ class OrchestratedPipeline:
                     fcontent = getattr(doc_payload, "content", None) or doc_payload.get("content", "")
                     clean_text = extract_text_from_document(fname, fcontent)
                     if clean_text and clean_text.strip():
-                        # Deterministic document fingerprint prevents duplicate chunks on re-ingestion
                         fingerprint = hashlib.sha256(f"{fname}:{clean_text[:5000]}:{len(clean_text)}".encode("utf-8")).hexdigest()[:12]
                         doc_id = f"doc-{fingerprint}"
+                        if doc_id not in effective_doc_ids:
+                            effective_doc_ids.append(doc_id)
                         knowledge_doc = KnowledgeDocument(
                             id=doc_id,
                             source=fname,
@@ -167,7 +196,14 @@ class OrchestratedPipeline:
 
         try:
             return await self._execute_inner(
-                user_task, run_id, created_at, traces, has_documents=bool(documents), documents=documents, history=history
+                user_task,
+                run_id,
+                created_at,
+                traces,
+                has_documents=bool(documents or effective_doc_ids),
+                documents=documents,
+                document_ids=effective_doc_ids or None,
+                history=history,
             )
         except Exception as exc:
             logger.error("Pipeline execution failed for run_id=%s: %s", run_id, str(exc), exc_info=True)
@@ -188,6 +224,7 @@ class OrchestratedPipeline:
         traces: List[StageTrace],
         has_documents: bool = False,
         documents: Optional[List[Any]] = None,
+        document_ids: Optional[List[str]] = None,
         history: Optional[List[Any]] = None,
     ) -> RunResponse:
         """Inner execution logic supporting DIRECT, SINGLE_AGENT, and MULTI_AGENT strategies."""
@@ -296,7 +333,7 @@ class OrchestratedPipeline:
                     raise RuntimeError(err_msg)
                 await self._emit(ExecutionEventType.RAG_STARTED, message="Retrieving knowledge context...")
                 try:
-                    ctx = await self.retrieval_service.retrieve(user_task, top_k=3)
+                    ctx = await self.retrieval_service.retrieve(user_task, top_k=3, document_ids=document_ids)
                     retrieved_chunks_collected = ctx.chunks
                     if ctx.chunks:
                         snippets = [f"[{c.source}]: {c.content}" for c in ctx.chunks]
@@ -413,7 +450,9 @@ class OrchestratedPipeline:
         )
 
         t_orch = time.perf_counter()
-        exec_result = await orchestrator.execute(graph, input_context={"user_task": user_task})
+        exec_result = await orchestrator.execute(
+            graph, input_context={"user_task": user_task, "document_ids": document_ids}
+        )
         orch_dur = round((time.perf_counter() - t_orch) * 1000, 2)
 
         research_results: List[ResearchResult] = []

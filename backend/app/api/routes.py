@@ -1,30 +1,42 @@
 """
 API Endpoints for Adaptive Multi-Agent Web Application.
+Provides document lifecycle endpoints, SSE streams, async run handling, and pipeline orchestration.
 """
 
 import asyncio
-from typing import List
+import json
+import uuid
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
 
 from app.config import settings
 from app.events import event_bus_registry
+from app.knowledge.document_service import (
+    DocumentEvent,
+    DocumentMetadata,
+    DocumentService,
+    DocumentStatus,
+    DocumentUploadResponse,
+)
+from app.knowledge.embeddings import MockEmbeddingProvider, get_embedding_provider
+from app.knowledge.repository import InMemoryKnowledgeRepository, KnowledgeRepository
 from app.llm.base import (
     LLMConfigurationError,
     LLMProviderError,
     LLMStructuredOutputError,
 )
 from app.llm.provider import get_llm_provider
+from app.logging_config import get_logger
 from app.models.schemas import (
+    AsyncRunResponse,
     RunRequest,
     RunResponse,
     SystemStatusResponse,
 )
-from app.pipeline.orchestrated_pipeline import OrchestratedPipeline
 from app.pipeline.baseline_pipeline import get_recent_runs
-from app.knowledge.repository import InMemoryKnowledgeRepository, KnowledgeRepository
-from app.logging_config import get_logger
+from app.pipeline.orchestrated_pipeline import OrchestratedPipeline
 
 logger = get_logger("app.api.routes")
 
@@ -32,6 +44,7 @@ logger = get_logger("app.api.routes")
 def get_shared_knowledge_repository() -> KnowledgeRepository:
     if settings.knowledge_database_url and settings.knowledge_database_url.strip():
         from app.knowledge.repository import PostgresPgvectorKnowledgeRepository
+
         return PostgresPgvectorKnowledgeRepository(
             database_url=settings.knowledge_database_url.strip(),
             embedding_dimensions=settings.knowledge_embedding_dimensions,
@@ -40,17 +53,37 @@ def get_shared_knowledge_repository() -> KnowledgeRepository:
 
 
 shared_knowledge_repository = get_shared_knowledge_repository()
+_shared_document_service: Optional[DocumentService] = None
 
+
+def get_shared_document_service() -> DocumentService:
+    global _shared_document_service
+    if _shared_document_service is None:
+        try:
+            embedder = get_embedding_provider(settings)
+        except Exception:
+            embedder = MockEmbeddingProvider()
+
+        _shared_document_service = DocumentService(
+            repository=shared_knowledge_repository,
+            embedding_provider=embedder,
+            chunk_size=getattr(settings, "knowledge_chunk_size", 1200),
+            chunk_overlap=getattr(settings, "knowledge_chunk_overlap", 120),
+            embedding_batch_size=getattr(settings, "embedding_batch_size", 32),
+            embedding_rate_limit_delay_seconds=getattr(settings, "embedding_rate_limit_delay_seconds", 0.0),
+        )
+    return _shared_document_service
+
+
+# Registry of run execution results & async tasks
+RUNS_INDEX: Dict[str, Dict[str, Any]] = {}
 
 router = APIRouter(prefix="/api", tags=["Multi-Agent Pipeline"])
 
 
-
 @router.get("/status", response_model=SystemStatusResponse)
 async def get_system_status() -> SystemStatusResponse:
-    """
-    Check backend configuration status and LLM provider readiness.
-    """
+    """Check backend configuration status and LLM provider readiness."""
     is_ready = settings.is_api_key_configured
     if is_ready:
         if settings.llm_provider.lower() == "mock":
@@ -73,16 +106,165 @@ async def get_system_status() -> SystemStatusResponse:
     )
 
 
-@router.post("/run", response_model=RunResponse)
-async def run_pipeline(request: RunRequest) -> RunResponse:
+# =====================================================================
+# Document Service Endpoints (Decoupled ingestion, dedup & status)
+# =====================================================================
+
+
+@router.post("/documents", response_model=DocumentUploadResponse)
+async def upload_document(
+    file: UploadFile = File(...),
+    label: Optional[str] = Form(None),
+) -> DocumentUploadResponse:
+    """
+    Upload a document for decoupled background extraction, chunking, and embedding.
+    Deduplicates by SHA-256 and returns immediately with document_id.
+    """
+    if not file.filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Filename cannot be empty.",
+        )
+    content_bytes = await file.read()
+    if not content_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is empty.",
+        )
+
+    doc_service = get_shared_document_service()
+    return await doc_service.register_and_start_ingestion(
+        filename=file.filename,
+        file_bytes=content_bytes,
+        label=label,
+    )
+
+
+@router.get("/documents", response_model=List[DocumentMetadata])
+async def list_documents() -> List[DocumentMetadata]:
+    """List all registered documents with their status and chunk progress."""
+    doc_service = get_shared_document_service()
+    return doc_service.list_documents()
+
+
+@router.get("/documents/{document_id}/status", response_model=DocumentMetadata)
+async def get_document_status(document_id: str) -> DocumentMetadata:
+    """Get the current ingestion status and chunk count of a specific document."""
+    doc_service = get_shared_document_service()
+    doc = doc_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document '{document_id}' not found.",
+        )
+    return doc
+
+
+@router.delete("/documents/{document_id}")
+async def delete_document(document_id: str):
+    """Delete a document and purge all associated chunks and embeddings."""
+    doc_service = get_shared_document_service()
+    deleted = await doc_service.delete_document(document_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document '{document_id}' not found.",
+        )
+    return {"document_id": document_id, "deleted": True}
+
+
+@router.get("/documents/{document_id}/events")
+async def stream_document_events(document_id: str):
+    """Server-Sent Events stream for background document ingestion progress."""
+    doc_service = get_shared_document_service()
+    doc = doc_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document '{document_id}' not found.",
+        )
+
+    bus = await doc_service.get_or_create_event_bus(document_id)
+
+    async def event_generator():
+        queue = await bus.subscribe()
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=20.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+
+                if event is None:
+                    break
+
+                data = json.dumps(event.model_dump())
+                yield f"event: {event.status.value}\ndata: {data}\n\n"
+                if event.status in (DocumentStatus.READY, DocumentStatus.FAILED):
+                    break
+        finally:
+            await bus.unsubscribe(queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# =====================================================================
+# Pipeline Execution Endpoints
+# =====================================================================
+
+
+async def _run_async_worker(
+    pipeline: OrchestratedPipeline, request: RunRequest, run_id: str
+) -> None:
+    """Background worker for asynchronous pipeline execution."""
+    RUNS_INDEX[run_id] = {
+        "run_id": run_id,
+        "status": "running",
+        "result": None,
+        "error": None,
+    }
+    try:
+        result = await pipeline.execute(
+            request.task.strip(),
+            documents=request.documents,
+            document_ids=request.document_ids,
+            history=request.history,
+        )
+        RUNS_INDEX[run_id] = {
+            "run_id": run_id,
+            "status": "completed",
+            "result": result.model_dump(),
+            "error": None,
+        }
+    except Exception as exc:
+        logger.error(
+            "Async pipeline execution failed for run_id=%s: %s",
+            run_id,
+            exc,
+            exc_info=True,
+        )
+        RUNS_INDEX[run_id] = {
+            "run_id": run_id,
+            "status": "failed",
+            "result": None,
+            "error": str(exc),
+        }
+
+
+@router.post("/run")
+async def run_pipeline(request: RunRequest):
     """
     Execute the Orchestrated Multi-Agent Pipeline.
-
-    Orchestrated steps:
-    Planner -> TaskGraph -> Orchestrator (Parallel + Capabilities + RAG) -> Evaluator -> Synthesizer
-
-    An SSE event stream for this run is available at GET /api/runs/{run_id}/events
-    once the run_id is returned.
+    Supports document_ids filtering, legacy documents ingestion, and async_run mode.
     """
     task_text = request.task.strip()
     if not task_text:
@@ -91,7 +273,26 @@ async def run_pipeline(request: RunRequest) -> RunResponse:
             detail="Task prompt cannot be empty. Please provide a task or question.",
         )
 
-    # 1. Initialize LLM Provider with clear configuration error handling
+    # Validate referenced document_ids readiness before starting
+    doc_service = get_shared_document_service()
+    if request.document_ids:
+        for doc_id in request.document_ids:
+            meta = doc_service.get_document(doc_id)
+            if not meta:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Referenced document '{doc_id}' does not exist.",
+                )
+            if meta.status != DocumentStatus.READY:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Referenced document '{doc_id}' is not ready (status: '{meta.status.value}'). "
+                        "Ingestion must complete before running."
+                    ),
+                )
+
+    # Initialize LLM Provider with clear configuration error handling
     try:
         provider = get_llm_provider(settings)
     except LLMConfigurationError as e:
@@ -104,30 +305,62 @@ async def run_pipeline(request: RunRequest) -> RunResponse:
             },
         )
 
-    import uuid
     run_id = request.run_id or str(uuid.uuid4())
     logger.info("Starting pipeline execution for run_id=%s, task='%s'", run_id, task_text[:100])
     event_bus = await event_bus_registry.get_or_create(run_id)
 
-    # 3. Run Orchestrated Pipeline (Stage 2-5 Graph + Orchestrator)
     pipeline = OrchestratedPipeline(
         llm_provider=provider,
         settings=settings,
         knowledge_repository=shared_knowledge_repository,
+        document_service=doc_service,
         event_bus=event_bus,
         run_id=run_id,
     )
 
+    # Asynchronous execution mode: returns immediately with run_id
+    if request.async_run:
+        RUNS_INDEX[run_id] = {
+            "run_id": run_id,
+            "status": "running",
+            "result": None,
+            "error": None,
+        }
+        asyncio.create_task(_run_async_worker(pipeline, request, run_id))
+        return AsyncRunResponse(
+            run_id=run_id,
+            status="started",
+            message="Pipeline execution started asynchronously. Stream events or poll GET /api/runs/{run_id}.",
+        )
+
+    # Synchronous execution mode (for backward compatibility and test suites)
     try:
         result = await pipeline.execute(
             task_text,
             documents=request.documents,
+            document_ids=request.document_ids,
             history=request.history,
         )
-        logger.info("Pipeline completed successfully for run_id=%s, strategy=%s", run_id, result.execution_strategy)
+        RUNS_INDEX[run_id] = {
+            "run_id": run_id,
+            "status": "completed",
+            "result": result.model_dump(),
+            "error": None,
+        }
+        logger.info(
+            "Pipeline completed successfully for run_id=%s, strategy=%s",
+            run_id,
+            result.execution_strategy,
+        )
         return result
     except LLMStructuredOutputError as e:
         logger.error("Structured output validation failed for run_id=%s: %s", run_id, str(e))
+        RUNS_INDEX[run_id] = {
+            "run_id": run_id,
+            "status": "failed",
+            "result": None,
+            "error": str(e),
+        }
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={
@@ -137,6 +370,12 @@ async def run_pipeline(request: RunRequest) -> RunResponse:
         )
     except LLMProviderError as e:
         logger.error("LLM provider error for run_id=%s: %s", run_id, str(e))
+        RUNS_INDEX[run_id] = {
+            "run_id": run_id,
+            "status": "failed",
+            "result": None,
+            "error": str(e),
+        }
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={
@@ -146,6 +385,12 @@ async def run_pipeline(request: RunRequest) -> RunResponse:
         )
     except Exception as e:
         logger.error("Internal pipeline error for run_id=%s: %s", run_id, str(e), exc_info=True)
+        RUNS_INDEX[run_id] = {
+            "run_id": run_id,
+            "status": "failed",
+            "result": None,
+            "error": str(e),
+        }
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
@@ -155,24 +400,34 @@ async def run_pipeline(request: RunRequest) -> RunResponse:
         )
 
 
+@router.get("/runs/{run_id}")
+async def get_run_status(run_id: str):
+    """Retrieve run execution status or completed RunResponse by run_id."""
+    if run_id in RUNS_INDEX:
+        return RUNS_INDEX[run_id]
+    for r in get_recent_runs():
+        if r.run_id == run_id:
+            return {
+                "run_id": run_id,
+                "status": "completed",
+                "result": r.model_dump(),
+                "error": None,
+            }
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Run '{run_id}' not found.",
+    )
+
+
 @router.get("/runs", response_model=List[RunResponse])
 async def list_recent_runs() -> List[RunResponse]:
-    """
-    Retrieve in-memory execution traces for recently executed runs.
-    """
+    """Retrieve in-memory execution traces for recently executed runs."""
     return get_recent_runs()
 
 
 @router.get("/runs/{run_id}/events")
 async def stream_run_events(run_id: str):
-    """
-    Server-Sent Events stream for a pipeline execution run.
-
-    Streams typed ExecutionEvent objects as they are emitted by the pipeline.
-    The connection closes after RUN_COMPLETED or RUN_FAILED.
-
-    Late subscribers receive the full buffered event history before live events.
-    """
+    """Server-Sent Events stream for a pipeline execution run."""
     bus = await event_bus_registry.get_or_create(run_id)
 
     async def event_generator():
@@ -182,12 +437,10 @@ async def stream_run_events(run_id: str):
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=30.0)
                 except asyncio.TimeoutError:
-                    # Send SSE keep-alive comment to prevent proxy/browser timeouts
                     yield ": keepalive\n\n"
                     continue
 
                 if event is None:
-                    # Run finished
                     break
                 yield event.to_sse()
         finally:

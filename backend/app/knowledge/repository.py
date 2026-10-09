@@ -3,7 +3,7 @@
 import json
 import math
 from abc import ABC, abstractmethod
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from app.knowledge.models import (
     DocumentChunk,
@@ -30,8 +30,13 @@ class KnowledgeRepository(ABC):
         """Persist one document's chunks and aligned embeddings."""
 
     @abstractmethod
-    async def similarity_search(self, query_embedding: List[float], top_k: int) -> List[RetrievedChunk]:
-        """Return the top-k most similar chunks with provenance."""
+    async def similarity_search(
+        self,
+        query_embedding: List[float],
+        top_k: int,
+        document_ids: Optional[List[str]] = None,
+    ) -> List[RetrievedChunk]:
+        """Return the top-k most similar chunks with provenance, optionally filtered to document_ids."""
 
     async def has_document(self, document_id: str) -> bool:
         """Check whether a document is already stored in the repository."""
@@ -83,7 +88,12 @@ class InMemoryKnowledgeRepository(KnowledgeRepository):
         for chunk, embedding in zip(chunks, embeddings):
             self.chunks[chunk.id] = StoredKnowledgeChunk(**chunk.model_dump(), embedding=embedding)
 
-    async def similarity_search(self, query_embedding: List[float], top_k: int) -> List[RetrievedChunk]:
+    async def similarity_search(
+        self,
+        query_embedding: List[float],
+        top_k: int,
+        document_ids: Optional[List[str]] = None,
+    ) -> List[RetrievedChunk]:
         if top_k < 1:
             raise KnowledgeRepositoryError("top_k must be at least 1.")
         if not query_embedding:
@@ -93,6 +103,8 @@ class InMemoryKnowledgeRepository(KnowledgeRepository):
 
         results: List[RetrievedChunk] = []
         for stored in self.chunks.values():
+            if document_ids is not None and stored.document_id not in document_ids:
+                continue
             if len(stored.embedding) != len(query_embedding):
                 raise KnowledgeRepositoryError("Query embedding dimension does not match stored embeddings.")
             score = _cosine_similarity(query_embedding, stored.embedding)
@@ -178,23 +190,33 @@ class PostgresPgvectorKnowledgeRepository(KnowledgeRepository):
                     (document_id,),
                 )
 
-    async def similarity_search(self, query_embedding: List[float], top_k: int) -> List[RetrievedChunk]:
+    async def similarity_search(
+        self,
+        query_embedding: List[float],
+        top_k: int,
+        document_ids: Optional[List[str]] = None,
+    ) -> List[RetrievedChunk]:
         if top_k < 1:
             raise KnowledgeRepositoryError("top_k must be at least 1.")
         self._validate_embedding(query_embedding)
         connection = await self._connect()
         async with connection:
             async with connection.cursor() as cursor:
-                await cursor.execute(
-                    """
+                query_sql = """
                     SELECT id, document_id, chunk_index, source, content, metadata,
                     1 - (embedding <=> %s::vector) AS similarity_score
                     FROM knowledge_chunks
+                """
+                params: list = [_vector_literal(query_embedding)]
+                if document_ids is not None:
+                    query_sql += " WHERE document_id = ANY(%s)"
+                    params.append(document_ids)
+                query_sql += """
                     ORDER BY embedding <=> %s::vector
                     LIMIT %s
-                    """,
-                    (_vector_literal(query_embedding), _vector_literal(query_embedding), top_k),
-                )
+                """
+                params.extend([_vector_literal(query_embedding), top_k])
+                await cursor.execute(query_sql, tuple(params))
                 rows = await cursor.fetchall()
         return [
             RetrievedChunk(

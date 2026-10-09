@@ -148,7 +148,7 @@ class Orchestrator:
                 dependency_results = {
                     dependency_id: results[dependency_id] for dependency_id in task.dependencies
                 }
-                retrieved_context = await self._retrieve_context_for_task(task)
+                retrieved_context = await self._retrieve_context_for_task(task, input_context=input_context)
                 execution_context = TaskExecutionContext(
                     task=task,
                     input_context=input_context,
@@ -180,8 +180,10 @@ class Orchestrator:
                     message=f"Task '{task.id}' failed: {exc}",
                 )
 
-    async def _retrieve_context_for_task(self, task: TaskNode):
-        """Retrieve structured context only when the task explicitly requests it."""
+    async def _retrieve_context_for_task(
+        self, task: TaskNode, input_context: Optional[Dict[str, Any]] = None
+    ):
+        """Retrieve structured context only when the task explicitly requests it, filtered to document_ids if provided."""
         metadata = task.metadata or {}
         query = metadata.get("retrieval_query")
         if query is None or not str(query).strip():
@@ -194,11 +196,17 @@ class Orchestrator:
         if not isinstance(top_k, int):
             raise ValueError("retrieval_top_k must be an integer.")
 
+        document_ids = metadata.get("document_ids") or (
+            input_context.get("document_ids") if input_context else None
+        )
+
         await self._emit_task_event(
             ExecutionEventType.RAG_STARTED, task,
             message=f"Retrieving context for task '{task.id}': {query}",
         )
-        result = await self.retrieval_service.retrieve(str(query), top_k=top_k)
+        result = await self.retrieval_service.retrieve(
+            str(query), top_k=top_k, document_ids=document_ids
+        )
         await self._emit_task_event(
             ExecutionEventType.RAG_COMPLETED, task,
             message=f"Retrieved {len(result.chunks)} chunk(s) for task '{task.id}'.",

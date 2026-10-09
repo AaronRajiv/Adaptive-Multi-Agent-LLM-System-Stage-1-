@@ -20,7 +20,11 @@ class RetrievalService:
         self.repository = repository
 
     async def retrieve(
-        self, query: str, top_k: int = 3, min_similarity: float | None = None
+        self,
+        query: str,
+        top_k: int = 3,
+        min_similarity: float | None = None,
+        document_ids: list[str] | None = None,
     ) -> RetrievedContext:
         if not query or not query.strip():
             raise RetrievalError("Retrieval query cannot be empty.")
@@ -31,7 +35,12 @@ class RetrievalService:
 
         try:
             query_embedding = await self.embedding_provider.embed(query)
-            chunks = await self.repository.similarity_search(query_embedding, top_k)
+            if document_ids is not None:
+                chunks = await self.repository.similarity_search(
+                    query_embedding, top_k, document_ids=document_ids
+                )
+            else:
+                chunks = await self.repository.similarity_search(query_embedding, top_k)
         except Exception as exc:
             logger.error("Retrieval failed for query '%s': %s", query, str(exc), exc_info=True)
             raise RetrievalError(f"Retrieval failed: {exc}") from exc
@@ -39,5 +48,11 @@ class RetrievalService:
         if min_similarity is not None:
             chunks = [chunk for chunk in chunks if chunk.similarity_score >= min_similarity]
 
-        logger.info("Retrieved %d chunk(s) for query '%s' (top_k=%d)", len(chunks), query, top_k)
+        logger.info(
+            "Retrieved %d chunk(s) for query '%s' (top_k=%d, doc_filter=%s)",
+            len(chunks),
+            query,
+            top_k,
+            document_ids,
+        )
         return RetrievedContext(query=query, chunks=chunks)

@@ -40,7 +40,7 @@ class FailingRepository(KnowledgeRepository):
     async def store(self, document, chunks, embeddings) -> None:
         raise KnowledgeRepositoryError("intentional store failure")
 
-    async def similarity_search(self, query_embedding, top_k):
+    async def similarity_search(self, query_embedding, top_k, document_ids=None):
         raise KnowledgeRepositoryError("intentional search failure")
 
 

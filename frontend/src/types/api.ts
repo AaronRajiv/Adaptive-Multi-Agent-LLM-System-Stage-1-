@@ -6,6 +6,29 @@ export interface DocumentPayload {
   metadata?: Record<string, unknown>;
 }
 
+export interface DocumentMetadata {
+  document_id: string;
+  filename: string;
+  label?: string;
+  sha256: string;
+  file_size_bytes: number;
+  status: "queued" | "extracting" | "embedding" | "ready" | "failed";
+  chunk_count: number;
+  embedded_chunk_count: number;
+  error_message?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DocumentUploadResponse {
+  document_id: string;
+  filename: string;
+  label?: string;
+  sha256: string;
+  status: "queued" | "extracting" | "embedding" | "ready" | "failed";
+  message: string;
+}
+
 export interface ChatMessagePayload {
   role: "user" | "assistant";
   content: string;

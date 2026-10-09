@@ -6,7 +6,13 @@ import { LiveArchitectureCanvas } from "@/components/architecture/LiveArchitectu
 import { TelemetryConsole, type TelemetryTab } from "@/components/telemetry/TelemetryConsole";
 
 import { adaptRun } from "@/services/adapters";
-import { executePipeline, fetchRecentRuns, fetchSystemStatus } from "@/services/api";
+import {
+  executePipeline,
+  fetchRecentRuns,
+  fetchSystemStatus,
+  uploadDocument,
+  fetchDocumentStatus,
+} from "@/services/api";
 import { ServerExecutionEventSource } from "@/services/executionEvents";
 import { processExecutionEvent, type LiveExecutionState } from "@/services/executionState";
 import {
@@ -154,29 +160,55 @@ export function ControlPlane() {
 
       setMessages((prev) => [...prev, userMsg, assistantMsg]);
 
-      // Read attached files text for RAG ingestion
-      const docPayloads: DocumentPayload[] = [];
+      // Upload attached files to document service and obtain document_ids
+      const attachedDocIds: string[] = [];
       if (files && files.length > 0) {
         for (const f of files) {
           try {
-            if (f.name.toLowerCase().endsWith(".pdf")) {
-              const dataUrl = await new Promise<string>((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = () => resolve((reader.result as string) || "");
-                reader.onerror = reject;
-                reader.readAsDataURL(f);
-              });
-              if (dataUrl) {
-                docPayloads.push({ filename: f.name, content: dataUrl });
+            const uploadEv = createClientEvent(
+              "DOC_UPLOAD",
+              `Uploading '${f.name}' to document service...`,
+              "RUNNING"
+            );
+            setEvents((prev) => [...prev, uploadEv]);
+            const uploadRes = await uploadDocument(f, f.name);
+            attachedDocIds.push(uploadRes.document_id);
+
+            if (uploadRes.status !== "ready") {
+              const pollDocInterval = 600;
+              for (let d = 0; d < 100; d++) {
+                await new Promise((r) => setTimeout(r, pollDocInterval));
+                const docStatus = await fetchDocumentStatus(uploadRes.document_id);
+                if (docStatus.status === "ready") {
+                  setEvents((prev) => [
+                    ...prev,
+                    createClientEvent(
+                      "DOC_READY",
+                      `'${f.name}' processed & ready (${docStatus.chunk_count} chunks).`,
+                      "COMPLETED"
+                    ),
+                  ]);
+                  break;
+                }
+                if (docStatus.status === "failed") {
+                  throw new Error(
+                    `Document ingestion failed for '${f.name}': ${docStatus.error_message || "Unknown error"}`
+                  );
+                }
               }
             } else {
-              const text = await f.text();
-              if (text.trim()) {
-                docPayloads.push({ filename: f.name, content: text });
-              }
+              setEvents((prev) => [
+                ...prev,
+                createClientEvent(
+                  "DOC_READY",
+                  `'${f.name}' already ingested (deduplicated by SHA-256).`,
+                  "COMPLETED"
+                ),
+              ]);
             }
           } catch (e) {
-            console.error("File reading error:", e);
+            console.error("Document upload error:", e);
+            throw e;
           }
         }
       }
@@ -223,7 +255,13 @@ export function ControlPlane() {
       );
 
       try {
-        const raw = await executePipeline(promptText, runId, docPayloads, historyPayload);
+        const raw = await executePipeline(
+          promptText,
+          runId,
+          undefined,
+          historyPayload,
+          attachedDocIds.length > 0 ? attachedDocIds : undefined
+        );
         if (!mounted.current || id !== requestId.current) return;
 
         const model = adaptRun(raw);

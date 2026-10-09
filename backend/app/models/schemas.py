@@ -112,10 +112,26 @@ class RunRequest(BaseModel):
         default=None,
         description="Optional list of attached documents to ingest into RAG knowledge base for context grounding"
     )
+    document_ids: Optional[List[str]] = Field(
+        default=None,
+        description="Optional list of pre-ingested document IDs to ground retrieval on"
+    )
+    async_run: Optional[bool] = Field(
+        default=False,
+        description="When True, pipeline executes asynchronously and returns immediately with run_id"
+    )
     history: Optional[List[ChatMessagePayload]] = Field(
         default=None,
         description="Optional conversation history turns for multi-turn chat context"
     )
+
+
+class AsyncRunResponse(BaseModel):
+    """Response returned when run_pipeline is invoked with async_run=True."""
+
+    run_id: str = Field(..., description="Unique UUID for this pipeline execution run")
+    status: str = Field(default="started", description="Current status of the asynchronous run")
+    message: str = Field(default="Pipeline execution started asynchronously", description="Status message")
 
 
 class RunResponse(BaseModel):

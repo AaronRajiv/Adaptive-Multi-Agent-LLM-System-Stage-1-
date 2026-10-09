@@ -3,6 +3,8 @@ import type {
   SystemStatusResponse,
   ApiErrorDetail,
   DocumentPayload,
+  DocumentMetadata,
+  DocumentUploadResponse,
   ChatMessagePayload,
 } from "../types/api";
 
@@ -19,7 +21,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request(path: string, init?: RequestInit, timeout = 120000): Promise<unknown> {
+async function request(path: string, init?: RequestInit, timeout = 15000): Promise<unknown> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
@@ -66,22 +68,128 @@ export async function fetchSystemStatus(): Promise<SystemStatusResponse> {
   }
 }
 
+export async function uploadDocument(
+  file: File,
+  label?: string
+): Promise<DocumentUploadResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (label) {
+    formData.append("label", label);
+  }
+
+  const res = await fetch(`${API_BASE_URL}/api/documents`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => null);
+    throw new ApiError(
+      errorData?.detail || `Document upload failed (HTTP ${res.status})`,
+      res.status,
+      errorData?.detail || "Upload error"
+    );
+  }
+  return (await res.json()) as DocumentUploadResponse;
+}
+
+export async function fetchDocumentStatus(
+  documentId: string
+): Promise<DocumentMetadata> {
+  return (await request(`/api/documents/${documentId}/status`, undefined, 8000)) as DocumentMetadata;
+}
+
+export async function fetchDocuments(): Promise<DocumentMetadata[]> {
+  try {
+    const data = await request("/api/documents", undefined, 8000);
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function deleteDocument(documentId: string): Promise<void> {
+  await request(`/api/documents/${documentId}`, { method: "DELETE" }, 8000);
+}
+
+export async function fetchRun(runId: string): Promise<any> {
+  return await request(`/api/runs/${runId}`, undefined, 8000);
+}
+
 export async function executePipeline(
   task: string,
   runId?: string,
   documents?: DocumentPayload[],
-  history?: ChatMessagePayload[]
+  history?: ChatMessagePayload[],
+  documentIds?: string[],
+  asyncRun = true
 ): Promise<RunResponse> {
-  return (await request("/api/run", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      task,
-      ...(runId ? { run_id: runId } : {}),
-      ...(documents && documents.length > 0 ? { documents } : {}),
-      ...(history && history.length > 0 ? { history } : {}),
-    }),
-  })) as RunResponse;
+  const payload = {
+    task,
+    async_run: asyncRun,
+    ...(runId ? { run_id: runId } : {}),
+    ...(documentIds && documentIds.length > 0 ? { document_ids: documentIds } : {}),
+    ...(documents && documents.length > 0 ? { documents } : {}),
+    ...(history && history.length > 0 ? { history } : {}),
+  };
+
+  if (!asyncRun) {
+    return (await request("/api/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })) as RunResponse;
+  }
+
+  // 1. Kick off pipeline asynchronously (returns immediately)
+  const initRes = (await request(
+    "/api/run",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    15000
+  )) as { run_id: string; status: string };
+
+  const effectiveRunId = initRes.run_id || runId || "";
+
+  // 2. Poll GET /api/runs/{run_id} until completed
+  const pollInterval = 1000;
+  const maxAttempts = 300;
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    try {
+      const runStatus = (await fetchRun(effectiveRunId)) as {
+        run_id: string;
+        status: string;
+        result?: RunResponse;
+        error?: string;
+      };
+
+      if (runStatus.status === "completed" && runStatus.result) {
+        return runStatus.result;
+      }
+      if (runStatus.status === "failed") {
+        throw new ApiError(
+          runStatus.error || "Pipeline execution failed.",
+          500,
+          runStatus.error || "Failed"
+        );
+      }
+    } catch (e) {
+      if (e instanceof ApiError && e.statusCode === 404) {
+        continue;
+      }
+      throw e;
+    }
+  }
+
+  throw new ApiError(
+    "Pipeline execution polling timed out after 300 seconds.",
+    408,
+    "Timeout"
+  );
 }
 
 export async function fetchRecentRuns(): Promise<RunResponse[]> {
