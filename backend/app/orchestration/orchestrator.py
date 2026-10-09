@@ -4,10 +4,11 @@ import asyncio
 from datetime import datetime, timezone
 from enum import Enum
 from time import perf_counter
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 from pydantic import BaseModel, Field
 
+from app.events import ExecutionEvent, ExecutionEventType, RunEventBus
 from app.knowledge.retrieval import RetrievalService
 from app.models.schemas import TaskExecutionTrace
 from app.models.task_graph import TaskGraph, TaskNode, TaskStatus
@@ -56,12 +57,14 @@ class Orchestrator:
         registry: CapabilityRegistry,
         max_concurrency: int = 4,
         retrieval_service: RetrievalService | None = None,
+        event_bus: Optional[RunEventBus] = None,
     ):
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be at least 1.")
         self.registry = registry
         self.max_concurrency = max_concurrency
         self.retrieval_service = retrieval_service
+        self.event_bus = event_bus
 
     async def execute(
         self, graph: TaskGraph, input_context: Dict[str, Any] | None = None
@@ -93,11 +96,11 @@ class Orchestrator:
         active: Set[asyncio.Task[None]] = set()
 
         while True:
-            self._mark_tasks_blocked_by_failed_dependencies(graph, trace)
+            await self._mark_tasks_blocked_by_failed_dependencies(graph, trace)
             capacity = self.max_concurrency - len(active)
             if capacity > 0:
                 for task in graph.runnable_tasks()[:capacity]:
-                    self._prepare_task_for_execution(task)
+                    await self._prepare_task_for_execution(task)
                     active.add(
                         asyncio.create_task(
                             self._execute_running_task(
@@ -119,10 +122,12 @@ class Orchestrator:
                 execution_trace=trace,
             )
 
-    def _prepare_task_for_execution(self, task: TaskNode) -> None:
+    async def _prepare_task_for_execution(self, task: TaskNode) -> None:
         """Reserve a runnable task before creating its asynchronous execution task."""
         if task.status == TaskStatus.PENDING:
             self._transition(task, TaskStatus.READY)
+            await self._emit_task_event(ExecutionEventType.TASK_READY, task)
+        await self._emit_task_event(ExecutionEventType.TASK_STARTED, task)
         self._transition(task, TaskStatus.RUNNING)
 
     async def _execute_running_task(
@@ -161,26 +166,44 @@ class Orchestrator:
                 self._transition(task, TaskStatus.COMPLETED)
                 results[task.id] = result
                 self._append_trace(trace, task, capability, agent, started_at, started, result=result)
+                await self._emit_task_event(
+                    ExecutionEventType.TASK_COMPLETED, task, capability=capability,
+                    message=f"Task '{task.id}' completed successfully.",
+                )
             except Exception as exc:
                 self._transition(task, TaskStatus.FAILED)
                 failure = TaskExecutionResult(task_id=task.id, success=False, error=str(exc))
                 results[task.id] = failure
                 self._append_trace(trace, task, capability, None, started_at, started, result=failure)
+                await self._emit_task_event(
+                    ExecutionEventType.TASK_FAILED, task, capability=capability,
+                    message=f"Task '{task.id}' failed: {exc}",
+                )
 
     async def _retrieve_context_for_task(self, task: TaskNode):
         """Retrieve structured context only when the task explicitly requests it."""
         metadata = task.metadata or {}
         query = metadata.get("retrieval_query")
-        if query is None:
+        if query is None or not str(query).strip():
             return None
         if self.retrieval_service is None:
-            raise RuntimeError("Task requests retrieval but no RetrievalService is configured.")
+            return None
         top_k = metadata.get("retrieval_top_k", 3)
         if not isinstance(top_k, int):
             raise ValueError("retrieval_top_k must be an integer.")
-        return await self.retrieval_service.retrieve(str(query), top_k=top_k)
 
-    def _mark_tasks_blocked_by_failed_dependencies(
+        await self._emit_task_event(
+            ExecutionEventType.RAG_STARTED, task,
+            message=f"Retrieving context for task '{task.id}': {query}",
+        )
+        result = await self.retrieval_service.retrieve(str(query), top_k=top_k)
+        await self._emit_task_event(
+            ExecutionEventType.RAG_COMPLETED, task,
+            message=f"Retrieved {len(result.chunks)} chunk(s) for task '{task.id}'.",
+        )
+        return result
+
+    async def _mark_tasks_blocked_by_failed_dependencies(
         self, graph: TaskGraph, trace: List[TaskExecutionTrace]
     ) -> None:
         blocking_states = {TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.SKIPPED}
@@ -204,6 +227,10 @@ class Orchestrator:
                     now,
                     perf_counter(),
                     result=TaskExecutionResult(task_id=task.id, success=False, error=error),
+                )
+                await self._emit_task_event(
+                    ExecutionEventType.TASK_BLOCKED, task,
+                    message=error,
                 )
 
     def _terminal_status(self, graph: TaskGraph) -> GraphExecutionStatus:
@@ -247,3 +274,24 @@ class Orchestrator:
     @staticmethod
     def _timestamp() -> str:
         return datetime.now(timezone.utc).isoformat()
+
+    async def _emit_task_event(
+        self,
+        event_type: ExecutionEventType,
+        task: TaskNode,
+        capability: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        """Emit a task-level event if an event bus is attached."""
+        if self.event_bus is None:
+            return
+        await self.event_bus.emit(
+            ExecutionEvent(
+                run_id=self.event_bus.run_id,
+                event_type=event_type,
+                task_id=task.id,
+                capability=capability or task.assigned_capability or task.type.value,
+                status=task.status.value,
+                message=message,
+            )
+        )

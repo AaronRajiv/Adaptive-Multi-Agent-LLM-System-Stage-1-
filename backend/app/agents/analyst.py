@@ -55,12 +55,27 @@ class AnalystAgent:
         )
 
         grounding_section = ""
-        if retrieved_context and retrieved_context.chunks:
-            chunk_texts = "\n\n".join(
-                f"[Source: {c.source} | Doc: {c.document_id} | Chunk #{c.chunk_index} (Score: {c.similarity_score:.2f})]:\n{c.content}"
-                for c in retrieved_context.chunks
-            )
-            grounding_section = f"\n\nRetrieved Grounding Evidence:\n{chunk_texts}\n"
+        if retrieved_context is not None:
+            if retrieved_context.chunks:
+                chunk_texts = "\n\n".join(
+                    f"[Source: {c.source} | Doc: {c.document_id} | Chunk #{c.chunk_index} (ID: {c.id}, Score: {c.similarity_score:.2f})]:\n"
+                    f"Content:\n{c.content}"
+                    for c in retrieved_context.chunks
+                )
+                grounding_section = (
+                    f"\n\nKNOWLEDGE BASE CONTEXT:\n{chunk_texts}\n\n"
+                    f"INSTRUCTIONS:\n"
+                    f"Use the supplied knowledge-base context when synthesizing analysis.\n"
+                    f"Do not claim that information came from the knowledge base unless it is supported by the supplied context.\n"
+                    f"If the context does not contain enough information, explicitly indicate that limitation.\n"
+                )
+            else:
+                grounding_section = (
+                    f"\n\nKNOWLEDGE BASE CONTEXT:\n"
+                    f"No relevant knowledge-base context was found for query \"{retrieved_context.query}\".\n\n"
+                    f"INSTRUCTIONS:\n"
+                    f"Do not claim that information came from the knowledge base since no relevant context was found.\n"
+                )
 
         prompt = (
             f"Original User Task:\n\"{user_task.strip()}\"\n\n"

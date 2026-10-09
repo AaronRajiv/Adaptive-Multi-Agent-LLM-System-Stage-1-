@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     embedding_model: str = Field(default="gemini-embedding-001", description="Embedding model name")
     knowledge_database_url: str = Field(default="", description="Optional PostgreSQL connection URL for the pgvector knowledge store")
     knowledge_embedding_dimensions: int = Field(default=768, ge=1, description="Vector dimensions for the configured knowledge repository")
+    knowledge_chunk_size: int = Field(default=1200, ge=100, description="Target character chunk size for document chunking")
+    knowledge_chunk_overlap: int = Field(default=120, ge=0, description="Overlap in characters between consecutive chunks")
+    embedding_batch_size: int = Field(default=64, ge=1, le=100, description="Batch size for embedding API calls")
+    embedding_max_concurrency: int = Field(default=5, ge=1, le=20, description="Max concurrent batches for embedding generation")
 
     # Agent / Pipeline configuration
     evaluator_pass_threshold: int = Field(

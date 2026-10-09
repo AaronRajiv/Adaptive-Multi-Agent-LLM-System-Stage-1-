@@ -1,5 +1,17 @@
 export type SubTaskType = "research" | "analysis";
 
+export interface DocumentPayload {
+  filename: string;
+  content: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ChatMessagePayload {
+  role: "user" | "assistant";
+  content: string;
+}
+
+
 export interface SubTask {
   id: string;
   description: string;

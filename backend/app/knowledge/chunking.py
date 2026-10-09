@@ -17,9 +17,11 @@ class Chunker(ABC):
 class FixedSizeTextChunker(Chunker):
     """Character-window chunker with bounded overlap for the Stage 5 baseline."""
 
-    def __init__(self, chunk_size: int = 500, overlap: int = 50):
+    def __init__(self, chunk_size: int = 1200, overlap: int | None = None):
         if chunk_size < 1:
             raise ValueError("chunk_size must be at least 1.")
+        if overlap is None:
+            overlap = min(120, int(chunk_size * 0.1))
         if overlap < 0 or overlap >= chunk_size:
             raise ValueError("overlap must be non-negative and smaller than chunk_size.")
         self.chunk_size = chunk_size

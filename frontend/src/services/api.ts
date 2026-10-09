@@ -1,5 +1,13 @@
-import type { RunResponse, SystemStatusResponse, ApiErrorDetail } from "../types/api";
+import type {
+  RunResponse,
+  SystemStatusResponse,
+  ApiErrorDetail,
+  DocumentPayload,
+  ChatMessagePayload,
+} from "../types/api";
+
 export const API_BASE_URL = import.meta.env["VITE_API_BASE_URL"] || "http://localhost:8000";
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -10,6 +18,7 @@ export class ApiError extends Error {
     this.name = "ApiError";
   }
 }
+
 async function request(path: string, init?: RequestInit, timeout = 120000): Promise<unknown> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
@@ -42,6 +51,7 @@ async function request(path: string, init?: RequestInit, timeout = 120000): Prom
     clearTimeout(timer);
   }
 }
+
 export async function fetchSystemStatus(): Promise<SystemStatusResponse> {
   try {
     return (await request("/api/status", undefined, 8000)) as SystemStatusResponse;
@@ -55,13 +65,25 @@ export async function fetchSystemStatus(): Promise<SystemStatusResponse> {
     };
   }
 }
-export async function executePipeline(task: string): Promise<RunResponse> {
+
+export async function executePipeline(
+  task: string,
+  runId?: string,
+  documents?: DocumentPayload[],
+  history?: ChatMessagePayload[]
+): Promise<RunResponse> {
   return (await request("/api/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ task }),
+    body: JSON.stringify({
+      task,
+      ...(runId ? { run_id: runId } : {}),
+      ...(documents && documents.length > 0 ? { documents } : {}),
+      ...(history && history.length > 0 ? { history } : {}),
+    }),
   })) as RunResponse;
 }
+
 export async function fetchRecentRuns(): Promise<RunResponse[]> {
   try {
     const data = await request("/api/runs", undefined, 8000);

@@ -61,4 +61,4 @@ def test_evaluation_result_invalid_score_bounds():
 
 def test_run_request_too_short():
     with pytest.raises(ValidationError):
-        RunRequest(task="ab")
+        RunRequest(task="")

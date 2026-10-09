@@ -47,15 +47,28 @@ class ResearchAgent:
             ResearchResult containing the subtask ID, description, and generated findings.
         """
         grounding_section = ""
-        if retrieved_context and retrieved_context.chunks:
-            chunk_texts = "\n\n".join(
-                f"[Source: {c.source} | Doc: {c.document_id} | Chunk #{c.chunk_index} (Score: {c.similarity_score:.2f})]:\n{c.content}"
-                for c in retrieved_context.chunks
-            )
-            grounding_section = (
-                f"\n\nRetrieved Knowledge Context (Grounding Evidence):\n{chunk_texts}\n\n"
-                f"Please ground your investigation in the retrieved evidence above where applicable."
-            )
+        if retrieved_context is not None:
+            if retrieved_context.chunks:
+                chunk_texts = "\n\n".join(
+                    f"[Source: {c.source} | Doc: {c.document_id} | Chunk #{c.chunk_index} (ID: {c.id}, Score: {c.similarity_score:.2f})]:\n"
+                    f"Content:\n{c.content}"
+                    for c in retrieved_context.chunks
+                )
+                grounding_section = (
+                    f"\n\nKNOWLEDGE BASE CONTEXT:\n{chunk_texts}\n\n"
+                    f"INSTRUCTIONS:\n"
+                    f"Use the supplied knowledge-base context when answering.\n"
+                    f"Do not claim that information came from the knowledge base unless it is supported by the supplied context.\n"
+                    f"If the context does not contain enough information, explicitly indicate that limitation.\n"
+                )
+            else:
+                grounding_section = (
+                    f"\n\nKNOWLEDGE BASE CONTEXT:\n"
+                    f"No relevant knowledge-base context was found for query \"{retrieved_context.query}\".\n\n"
+                    f"INSTRUCTIONS:\n"
+                    f"Do not claim that information came from the knowledge base since no relevant context was found.\n"
+                    f"If knowledge-base context is required to answer accurately, explicitly state that limitation.\n"
+                )
 
         prompt = (
             f"Overall Task Context:\n\"{user_task.strip()}\"\n\n"

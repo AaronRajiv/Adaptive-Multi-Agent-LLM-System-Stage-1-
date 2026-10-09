@@ -40,19 +40,19 @@ class ResearchResult(BaseModel):
 class EvaluationResult(BaseModel):
     """Structured output emitted by the Evaluator Agent."""
 
-    score: int = Field(
-        ...,
+    score: Optional[int] = Field(
+        default=None,
         ge=0,
         le=100,
-        description="Evaluation quality score from 0 to 100"
+        description="Evaluation quality score from 0 to 100, or None if evaluation was skipped/not applicable"
     )
-    status: Literal["PASS", "FAIL"] = Field(
+    status: Literal["PASS", "FAIL", "SKIPPED", "NOT_APPLICABLE"] = Field(
         ...,
-        description="PASS if score >= threshold, otherwise FAIL"
+        description="PASS/FAIL for evaluated tasks, or SKIPPED/NOT_APPLICABLE when formal evaluation is bypassed"
     )
     feedback: str = Field(
         ...,
-        description="Detailed constructive critique evaluating correctness, completeness, relevance, and clarity"
+        description="Constructive critique evaluating correctness, completeness, relevance, and clarity"
     )
 
 
@@ -81,13 +81,40 @@ class TaskExecutionTrace(BaseModel):
     error: Optional[str] = None
 
 
+class DocumentPayload(BaseModel):
+    """Payload representing an attached document for RAG ingestion."""
+
+    filename: str = Field(..., description="Document filename or title")
+    content: str = Field(..., description="Full text content of the document")
+    metadata: Optional[dict] = Field(default=None, description="Optional metadata")
+
+
+class ChatMessagePayload(BaseModel):
+    """Previous conversation turn for multi-turn chat memory."""
+
+    role: Literal["user", "assistant"] = Field(..., description="Message sender role")
+    content: str = Field(..., description="Message text content")
+
+
 class RunRequest(BaseModel):
     """API Request payload to execute a user task."""
 
     task: str = Field(
         ...,
-        min_length=3,
+        min_length=1,
         description="High-level user task to be decomposed and solved"
+    )
+    run_id: Optional[str] = Field(
+        default=None,
+        description="Optional pre-assigned run ID to enable early SSE subscription prior to run completion"
+    )
+    documents: Optional[List[DocumentPayload]] = Field(
+        default=None,
+        description="Optional list of attached documents to ingest into RAG knowledge base for context grounding"
+    )
+    history: Optional[List[ChatMessagePayload]] = Field(
+        default=None,
+        description="Optional conversation history turns for multi-turn chat context"
     )
 
 
@@ -105,6 +132,8 @@ class RunResponse(BaseModel):
     created_at: str = Field(..., description="ISO 8601 timestamp of execution")
 
     # Stage 2-5 Extensions:
+    execution_strategy: Optional[str] = Field(default="MULTI_AGENT", description="Selected execution strategy: DIRECT, SINGLE_AGENT, or MULTI_AGENT")
+    replanning_count: int = Field(default=0, description="Number of targeted replanning iterations performed")
     task_graph: Optional[TaskGraph] = Field(default=None, description="Executed TaskGraph with runtime statuses and dependencies")
     retrieved_chunks: List[Any] = Field(default_factory=list, description="All retrieved knowledge chunks with provenance")
     task_execution_traces: List[TaskExecutionTrace] = Field(default_factory=list, description="Per-task execution traces from Orchestrator")

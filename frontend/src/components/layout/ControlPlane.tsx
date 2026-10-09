@@ -1,36 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { motion } from "motion/react";
-import {
-  Activity,
-  ArrowRight,
-  Check,
-  ChevronDown,
-  CircleHelp,
-  Command,
-  GitBranch,
-  History,
-  Layers3,
-  LoaderCircle,
-  Network,
-  Play,
-  Radio,
-  RotateCcw,
-  Trash2,
-  X,
-} from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { Button } from "@/components/ui/button";
-import { ExecutionGraph } from "@/components/graph/ExecutionGraph";
-import {
-  ExecutionConsole,
-  FloatingInspector,
-  type InspectorTab,
-} from "@/components/execution/ExecutionConsole";
-import { adaptRun, architectureTasks } from "@/services/adapters";
+import { Sidebar } from "@/components/sidebar/Sidebar";
+import { ChatPanel } from "@/components/chat/ChatPanel";
+import { LiveArchitectureCanvas } from "@/components/architecture/LiveArchitectureCanvas";
+import { TelemetryConsole, type TelemetryTab } from "@/components/telemetry/TelemetryConsole";
+
+import { adaptRun } from "@/services/adapters";
 import { executePipeline, fetchRecentRuns, fetchSystemStatus } from "@/services/api";
-import { ResponseExecutionEventSource } from "@/services/executionEvents";
-import type { ExecutionEvent, ExecutionModel, ExecutionTask } from "@/types/execution";
-const presets = [
+import { ServerExecutionEventSource } from "@/services/executionEvents";
+import { processExecutionEvent, type LiveExecutionState } from "@/services/executionState";
+import {
+  createInitialArchitectureState,
+  updateArchitectureFromEvent,
+  updateArchitectureFromModel,
+  type ArchitectureState,
+} from "@/services/architectureState";
+import type { ChatMessage, ExecutionEvent, ExecutionModel, ExecutionTask } from "@/types/execution";
+import type { ArchitectureNodeId } from "@/types/architecture";
+import type { ChatMessagePayload, DocumentPayload } from "@/types/api";
+
+const PRESETS = [
   {
     label: "EV vs Petrol Vehicles",
     task: "Compare electric and petrol vehicles across lifecycle emissions, total cost of ownership, infrastructure requirements, and long-term adoption.",
@@ -40,27 +29,38 @@ const presets = [
     task: "Analyze the challenges and opportunities of a renewable energy grid, including storage, reliability, infrastructure, and cost.",
   },
 ];
+
 export function ControlPlane() {
   const [task, setTask] = useState("");
-  const [view, setView] = useState<"architecture" | "execution">("architecture");
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [run, setRun] = useState<ExecutionModel>();
+  const [liveTasks, setLiveTasks] = useState<ExecutionTask[]>([]);
   const [events, setEvents] = useState<ExecutionEvent[]>([]);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
-  const [selected, setSelected] = useState<ExecutionTask>();
-  const [floating, setFloating] = useState(false);
-  const [tab, setTab] = useState<InspectorTab>("synthesis");
-  const [history, setHistory] = useState(false);
-  const [cleared, setCleared] = useState(false);
+  const [selectedTask, setSelectedTask] = useState<ExecutionTask>();
+  const [selectedNodeId, setSelectedNodeId] = useState<ArchitectureNodeId>();
+  const [telemetryTab, setTelemetryTab] = useState<TelemetryTab>("events");
+
+  // QoL States: Collapsible Sidebar & Resizable Right Panel
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [rightPanelWidth, setRightPanelWidth] = useState(540);
+  const isDraggingRef = useRef(false);
+
+  const [archState, setArchState] = useState<ArchitectureState>(createInitialArchitectureState());
+
   const requestId = useRef(0);
   const mounted = useRef(true);
+
   const status = useQuery({
     queryKey: ["system-status"],
     queryFn: fetchSystemStatus,
     refetchInterval: 15000,
     retry: false,
   });
+
   const recent = useQuery({ queryKey: ["recent-runs"], queryFn: fetchRecentRuns, retry: false });
+
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -68,10 +68,44 @@ export function ControlPlane() {
       requestId.current++;
     };
   }, []);
-  const event = (
+
+  // Draggable Resizer Handler for Right Panel
+  const startResizing = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isDraggingRef.current = true;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }, []);
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDraggingRef.current) return;
+      const newWidth = window.innerWidth - e.clientX;
+      if (newWidth >= 360 && newWidth <= 880) {
+        setRightPanelWidth(newWidth);
+      }
+    };
+
+    const handleMouseUp = () => {
+      if (isDraggingRef.current) {
+        isDraggingRef.current = false;
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      }
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, []);
+
+  const createClientEvent = (
     label: string,
     message: string,
-    status?: ExecutionEvent["status"],
+    status?: ExecutionEvent["status"]
   ): ExecutionEvent => ({
     id: `${Date.now()}-${label}`,
     label,
@@ -80,40 +114,171 @@ export function ControlPlane() {
     time: new Date().toLocaleTimeString("en-GB"),
     status,
   });
-  const submit = useCallback(async () => {
-    if (running || !task.trim()) return;
-    const id = ++requestId.current;
-    setRunning(true);
-    setError("");
-    setRun(undefined);
-    setSelected(undefined);
-    setFloating(false);
-    setView("execution");
-    setCleared(false);
-    setTab("synthesis");
-    setEvents([event("TASK_RECEIVED", "Request submitted to the API", "READY")]);
-    try {
-      const raw = await executePipeline(task.trim());
-      if (!mounted.current || id !== requestId.current) return;
-      const model = adaptRun(raw);
-      setRun(model);
-      const trace: ExecutionEvent[] = [];
-      new ResponseExecutionEventSource(model).subscribe((e) => trace.push(e));
-      setEvents((current) => [
-        ...current,
-        ...trace,
-        event("RESPONSE_RECEIVED", "Execution response received", "COMPLETED"),
-      ]);
-      recent.refetch();
-    } catch (err) {
-      if (!mounted.current || id !== requestId.current) return;
-      const message = err instanceof Error ? err.message : "Execution failed";
-      setError(message);
-      setEvents((current) => [...current, event("REQUEST_FAILED", message, "FAILED")]);
-    } finally {
-      if (mounted.current && id === requestId.current) setRunning(false);
-    }
-  }, [task, running, recent.refetch]);
+
+  const submit = useCallback(
+    async (files?: File[]) => {
+      const promptText = task.trim();
+      if (running || !promptText) return;
+      const id = ++requestId.current;
+
+      setRunning(true);
+      setError("");
+      setTask("");
+      setSelectedTask(undefined);
+      setSelectedNodeId(undefined);
+
+      // Extract conversation history from previous completed turns
+      const historyPayload: ChatMessagePayload[] = messages
+        .filter((m) => Boolean(m.content))
+        .map((m) => ({ role: m.role, content: m.content }));
+
+      // Append user prompt message & assistant placeholder message
+      const userMsgId = `user-${Date.now()}`;
+      const assistantMsgId = `assistant-${Date.now()}`;
+      const initialClientEv = createClientEvent("TASK_RECEIVED", "Request submitted to the API", "READY");
+
+      const userMsg: ChatMessage = {
+        id: userMsgId,
+        role: "user",
+        content: promptText,
+        files: files ? [...files] : undefined,
+      };
+
+      const assistantMsg: ChatMessage = {
+        id: assistantMsgId,
+        role: "assistant",
+        content: "",
+        events: [initialClientEv],
+        running: true,
+      };
+
+      setMessages((prev) => [...prev, userMsg, assistantMsg]);
+
+      // Read attached files text for RAG ingestion
+      const docPayloads: DocumentPayload[] = [];
+      if (files && files.length > 0) {
+        for (const f of files) {
+          try {
+            if (f.name.toLowerCase().endsWith(".pdf")) {
+              const dataUrl = await new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve((reader.result as string) || "");
+                reader.onerror = reject;
+                reader.readAsDataURL(f);
+              });
+              if (dataUrl) {
+                docPayloads.push({ filename: f.name, content: dataUrl });
+              }
+            } else {
+              const text = await f.text();
+              if (text.trim()) {
+                docPayloads.push({ filename: f.name, content: text });
+              }
+            }
+          } catch (e) {
+            console.error("File reading error:", e);
+          }
+        }
+      }
+
+      const runId =
+        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `run-${Date.now()}`;
+
+      let liveState: LiveExecutionState = {
+        running: true,
+        tasks: [],
+        events: [initialClientEv],
+        chunks: [],
+      };
+
+      let currentArch = createInitialArchitectureState();
+      const initialEv = createClientEvent("RUN_STARTED", "Pipeline execution started", "RUNNING");
+      currentArch = updateArchitectureFromEvent(currentArch, initialEv);
+
+      setEvents(liveState.events);
+      setLiveTasks(liveState.tasks);
+      setArchState(currentArch);
+
+      const sseSource = new ServerExecutionEventSource(runId);
+      const unsubscribe = sseSource.subscribe(
+        (ev) => {
+          if (!mounted.current || id !== requestId.current) return;
+
+          liveState = processExecutionEvent(liveState, ev);
+          currentArch = updateArchitectureFromEvent(currentArch, ev);
+
+          setEvents([...liveState.events]);
+          setLiveTasks([...liveState.tasks]);
+          setArchState({ ...currentArch });
+
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantMsgId ? { ...msg, events: [...liveState.events] } : msg
+            )
+          );
+        },
+        () => {}
+      );
+
+      try {
+        const raw = await executePipeline(promptText, runId, docPayloads, historyPayload);
+        if (!mounted.current || id !== requestId.current) return;
+
+        const model = adaptRun(raw);
+        setRun(model);
+
+        const compEv = createClientEvent("RUN_COMPLETED", "Pipeline execution completed successfully", "COMPLETED");
+        currentArch = updateArchitectureFromEvent(currentArch, compEv);
+        if (model.chunks && model.chunks.length > 0) {
+          currentArch.ragUsed = true;
+          const ragNode = currentArch.nodes.find((n) => n.id === "rag");
+          if (ragNode) {
+            ragNode.status = "COMPLETED";
+            ragNode.detail = `${model.chunks.length} chunk(s) retrieved`;
+          }
+        }
+        setArchState({ ...currentArch });
+
+        setEvents((current) => [
+          ...current,
+          createClientEvent("RESPONSE_RECEIVED", "Execution response received", "COMPLETED"),
+        ]);
+
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantMsgId
+              ? { ...msg, content: model.finalAnswer, running: false, executionStrategy: model.executionStrategy }
+              : msg
+          )
+        );
+
+        recent.refetch();
+      } catch (err) {
+        if (!mounted.current || id !== requestId.current) return;
+        const message = err instanceof Error ? err.message : "Execution failed";
+        setError(message);
+
+        const failEv = createClientEvent("RUN_FAILED", message, "FAILED");
+        currentArch = updateArchitectureFromEvent(currentArch, failEv);
+        setArchState({ ...currentArch });
+
+        setEvents((current) => [...current, createClientEvent("REQUEST_FAILED", message, "FAILED")]);
+
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantMsgId ? { ...msg, error: message, running: false } : msg
+          )
+        );
+      } finally {
+        unsubscribe();
+        if (mounted.current && id === requestId.current) setRunning(false);
+      }
+    },
+    [task, running, messages, recent.refetch]
+  );
+
   useEffect(() => {
     const listener = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
@@ -124,331 +289,121 @@ export function ControlPlane() {
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
   }, [submit]);
+
   const clear = () => {
+    setMessages([]);
     setRun(undefined);
+    setLiveTasks([]);
     setEvents([]);
     setError("");
-    setSelected(undefined);
-    setFloating(false);
-    setCleared(true);
-    setTab("synthesis");
-    setView("execution");
+    setSelectedTask(undefined);
+    setSelectedNodeId(undefined);
+    setArchState(createInitialArchitectureState());
   };
-  const tasks = view === "architecture" ? architectureTasks : (run?.tasks ?? []);
+
+  const handleSelectRecentRun = (runId: string) => {
+    const target = recent.data?.find((r) => r.run_id === runId);
+    if (!target) return;
+    try {
+      const model = adaptRun(target);
+      setRun(model);
+      setTask("");
+      setEvents(model.events);
+      setLiveTasks(model.tasks);
+      setError("");
+
+      setMessages([
+        { id: `hist-user-${runId}`, role: "user", content: model.task },
+        { id: `hist-ast-${runId}`, role: "assistant", content: model.finalAnswer, events: model.events },
+      ]);
+
+      setArchState(updateArchitectureFromModel(model));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Unable to load run");
+    }
+  };
+
+  const displayTasks = run?.tasks ?? liveTasks;
   const online = status.data?.configured === true;
+
   return (
-    <main className="control-plane">
-      <header className="system-header">
-        <div className="brand">
-          <div className="brand-mark">
-            <Network size={20} />
-          </div>
-          <div>
-            <h1>
-              Adaptive Multi-Agent <span>LLM System</span>
-            </h1>
-            <p>Resource-aware task orchestration</p>
-          </div>
-          <span className="version-label">STAGE 05</span>
-        </div>
-        <div className="preset-group">
-          <span className="preset-label">PRESETS</span>
-          {presets.map((p) => (
-            <Button
-              key={p.label}
-              variant="ghost"
-              size="sm"
-              className="preset-button"
-              disabled={running}
-              onClick={() => setTask(p.task)}
-            >
-              {p.label}
-              <ArrowRight size={10} />
-            </Button>
-          ))}
-        </div>
-        <div className="header-actions">
-          <span
-            className={`system-status ${running ? "executing" : online ? "online" : ""}`}
-            title={status.data?.message}
-          >
-            <i />
-            {running
-              ? "EXECUTING"
-              : status.isPending
-                ? "CONNECTING"
-                : online
-                  ? "SYSTEM ONLINE"
-                  : "OFFLINE"}
-          </span>
-          <span className="header-divider" />
-          <Button
-            variant="ghost"
-            size="icon"
-            title="Recent runs"
-            aria-label="Recent runs"
-            onClick={() => setHistory(!history)}
-          >
-            <History />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            title="Clear canvas"
-            aria-label="Clear canvas"
-            disabled={running}
-            onClick={clear}
-          >
-            <Trash2 size={13} />
-          </Button>
-        </div>
-      </header>
-      <form
-        className="task-command"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void submit();
-        }}
-      >
-        <span className="command-symbol">
-          <Command size={17} />
-        </span>
-        <input
-          aria-label="Analytical task"
-          placeholder="Enter complex analytical task..."
-          value={task}
-          disabled={running}
-          onChange={(e) => setTask(e.target.value)}
-          autoComplete="off"
+    <div className="flex h-screen w-screen bg-black overflow-hidden font-sans select-none">
+      {/* 1. Collapsible Left Conversation Sidebar */}
+      <Sidebar
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+        running={running}
+        online={online}
+        statusMessage={status.data?.message}
+        presets={PRESETS}
+        onSelectPreset={(t) => setTask(t)}
+        recentRuns={recent.data}
+        onSelectRecentRun={handleSelectRecentRun}
+        onRefreshRecent={() => recent.refetch()}
+        onClear={clear}
+      />
+
+      {/* 2. Center Chat Panel */}
+      <div className="flex-1 h-full min-w-[320px]">
+        <ChatPanel
+          messages={messages}
+          task={task}
+          setTask={setTask}
+          onSubmit={(files) => void submit(files)}
+          running={running}
+          onClear={clear}
+          presets={PRESETS}
         />
-        <Button
-          type="submit"
-          variant="outline"
-          disabled={running || !task.trim()}
-          className={`run-button ${running ? "is-running" : ""}`}
-        >
-          {running ? <LoaderCircle className="animate-spin" /> : <Play size={13} />}
-          {running ? "Running Pipeline" : "Run Pipeline"}
-          <kbd>⌘ ↵</kbd>
-        </Button>
-      </form>
-      <section className="workspace">
-        <header className="workspace-header">
-          <div className="workspace-title">
-            <GitBranch size={15} />
-            <strong>{view === "architecture" ? "System Architecture" : "Execution Graph"}</strong>
-            <span className="workspace-divider" />
-            <span className="workspace-subtitle">
-              {view === "architecture"
-                ? "Dependency-aware orchestration"
-                : run
-                  ? `${run.tasks.length} tasks · ${run.runId.slice(0, 12)}`
-                  : running
-                    ? "Awaiting backend response"
-                    : "No active run"}
-            </span>
-          </div>
-          <div className="view-toggle" role="group" aria-label="Graph view">
-            <Button
-              size="sm"
-              variant="ghost"
-              aria-pressed={view === "architecture"}
-              className={view === "architecture" ? "view-active" : ""}
-              onClick={() => {
-                setView("architecture");
-                setSelected(undefined);
-                setFloating(false);
-              }}
-            >
-              <Layers3 size={12} />
-              Architecture
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              aria-pressed={view === "execution"}
-              className={view === "execution" ? "view-active" : ""}
-              onClick={() => {
-                setView("execution");
-                setSelected(undefined);
-                setFloating(false);
-              }}
-            >
-              <Radio size={12} />
-              Live Execution
-            </Button>
-          </div>
-        </header>
-        <div className="canvas-container">
-          <div className="canvas-caption">
-            <span className="caption-dot" />
-            <span>
-              {view === "architecture"
-                ? "ARCHITECTURE"
-                : running
-                  ? "REQUEST IN FLIGHT"
-                  : run
-                    ? "RETURNED EXECUTION"
-                    : "EXECUTION VIEW"}
-            </span>
-            <span className="caption-line" />
-            {view === "architecture"
-              ? "Conceptual system architecture — not a live execution."
-              : run && !run.dependenciesAvailable
-                ? "Dependencies not exposed by this API"
-                : running
-                  ? "No real-time telemetry exposed"
-                  : run
-                    ? "Post-run results · not live telemetry"
-                    : "No current run"}
-          </div>
-          <ExecutionGraph
-            tasks={tasks}
-            conceptual={view === "architecture"}
-            selectedId={selected?.id}
-            onSelect={(t) => {
-              setSelected(t);
-              setTab("node");
-              setFloating(true);
+      </div>
+
+      {/* Draggable Divider Handle */}
+      <div
+        onMouseDown={startResizing}
+        className="w-1.5 h-full bg-white/5 hover:bg-emerald-500/50 cursor-col-resize transition-colors flex-shrink-0 flex items-center justify-center group z-30"
+        title="Drag to resize panel width"
+      >
+        <div className="w-0.5 h-8 bg-neutral-600 group-hover:bg-emerald-400 rounded-full transition-colors" />
+      </div>
+
+      {/* 3. Resizable Right Observability Panel */}
+      <div
+        style={{ width: `${rightPanelWidth}px` }}
+        className="h-full flex flex-col p-3 gap-3 bg-neutral-950/90 border-l border-white/10 flex-shrink-0"
+      >
+        {/* Live Architecture Canvas (Top 56%) */}
+        <div className="h-[56%] min-h-[280px]">
+          <LiveArchitectureCanvas
+            nodes={archState.nodes}
+            particles={archState.particles}
+            ragUsed={archState.ragUsed}
+            toolsUsed={archState.toolsUsed}
+            selectedNodeId={selectedNodeId}
+            onSelectNode={(nodeId) => {
+              setSelectedNodeId(nodeId);
+              if (nodeId === "task_graph" || nodeId === "agents") {
+                setTelemetryTab("graph");
+              } else if (nodeId === "rag") {
+                setTelemetryTab("rag");
+              } else {
+                setTelemetryTab("node");
+              }
             }}
           />
-          {running && (
-            <div className="running-notice">
-              <LoaderCircle size={16} className="animate-spin" />
-              <span>Pipeline request in progress</span>
-            </div>
-          )}
-          {error && (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="error-notice"
-              role="alert"
-            >
-              <span>
-                <X size={15} />
-                <strong>Execution failed</strong>
-              </span>
-              <p>{error}</p>
-              <Button variant="ghost" size="sm" onClick={() => void submit()}>
-                <RotateCcw size={12} />
-                Retry
-              </Button>
-            </motion.div>
-          )}
-          {selected && floating && (
-            <FloatingInspector task={selected} onClose={() => setFloating(false)} />
-          )}
-          <div className="canvas-legend">
-            <span>
-              <i className="legend-pending" />
-              Pending
-            </span>
-            <span>
-              <i className="legend-running" />
-              Running
-            </span>
-            <span>
-              <i className="legend-completed" />
-              Completed
-            </span>
-            <span>
-              <i className="legend-failed" />
-              Failed
-            </span>
-            <span className="legend-divider" />
-            <span>
-              <GitBranch size={11} />
-              Dependency
-            </span>
-          </div>
         </div>
-      </section>
-      <ExecutionConsole
-        events={events}
-        run={run}
-        selected={selected}
-        tab={tab}
-        setTab={setTab}
-        running={running}
-      />
-      <footer className="system-footer">
-        <span>
-          <span className="footer-dot" />
-          ADAPTIVE ORCHESTRATION ENGINE<span className="footer-slash">/</span>
-          {running
-            ? "EXECUTING"
-            : cleared
-              ? "CANVAS CLEARED"
-              : error
-                ? "FAILED"
-                : run
-                  ? "RESPONSE RECEIVED"
-                  : "IDLE"}
-        </span>
-        <span className="footer-model">
-          {online && status.data?.model && status.data.model !== "unknown"
-            ? `${status.data.provider && status.data.provider !== "unknown" ? `${status.data.provider} / ` : ""}${status.data.model}`
-            : "MODEL — UNAVAILABLE"}
-          <span className="footer-slash">/</span>
-          {online && typeof status.data?.evaluator_threshold === "number"
-            ? `EVALUATOR THRESHOLD ${status.data.evaluator_threshold}`
-            : "STATUS CHECK EVERY 15s"}
-          <CircleHelp size={11} aria-label="Connection details" />
-          <span title={status.data?.message}>{online ? "CONNECTED" : "OFFLINE"}</span>
-        </span>
-      </footer>
-      {history && (
-        <aside className="history-panel">
-          <header>
-            <strong>Recent runs</strong>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Close recent runs"
-              onClick={() => setHistory(false)}
-            >
-              <X />
-            </Button>
-          </header>
-          {recent.data?.length ? (
-            recent.data.map((r) => (
-              <Button
-                variant="ghost"
-                key={r.run_id}
-                className="history-item"
-                onClick={() => {
-                  try {
-                    const model = adaptRun(r);
-                    setRun(model);
-                    setTask(model.task);
-                    setEvents(model.events);
-                    setView("execution");
-                    setSelected(undefined);
-                    setFloating(false);
-                    setError("");
-                    setHistory(false);
-                  } catch (e) {
-                    setError(e instanceof Error ? e.message : "Unable to load run");
-                  }
-                }}
-              >
-                <span>
-                  {r.user_task}
-                  <small>{r.run_id}</small>
-                </span>
-                <ChevronDown size={13} />
-              </Button>
-            ))
-          ) : (
-            <p>{online ? "No recent runs returned." : "Recent runs unavailable while offline."}</p>
-          )}
-          <Button variant="ghost" size="sm" onClick={() => recent.refetch()}>
-            <RotateCcw size={12} />
-            Refresh
-          </Button>
-        </aside>
-      )}
-    </main>
+
+        {/* Telemetry Console & Inspector (Bottom 44%) */}
+        <div className="flex-1 min-h-[180px]">
+          <TelemetryConsole
+            events={events}
+            run={run}
+            selectedTask={selectedTask}
+            activeTab={telemetryTab}
+            setActiveTab={setTelemetryTab}
+            running={running}
+            tasks={displayTasks}
+          />
+        </div>
+      </div>
+    </div>
   );
 }

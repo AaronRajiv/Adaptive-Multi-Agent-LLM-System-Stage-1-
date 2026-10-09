@@ -42,12 +42,12 @@ class CapturePromptLLMProvider(LLMProvider):
     async def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         self.prompts.append(prompt)
         sys_lower = (system_prompt or "").lower()
-        if "research agent" in sys_lower or "researcher" in sys_lower:
-            return "Research findings on topic."
-        if "analyst agent" in sys_lower or "analyst" in sys_lower:
-            return "Analytical synthesis covering core dimensions and trade-offs."
-        if "synthesizer" in sys_lower or "final synthesizer" in sys_lower:
+        if "synthesizer" in sys_lower:
             return "# Final Comprehensive Response\n\nExecutive summary and findings."
+        if "analyst" in sys_lower:
+            return "Analytical synthesis covering core dimensions and trade-offs."
+        if "research" in sys_lower:
+            return "Research findings on topic."
         return "Generic mock generation."
 
     async def generate_structured(self, prompt: str, schema: Any, system_prompt: Optional[str] = None) -> Any:
@@ -70,6 +70,15 @@ class CapturePromptLLMProvider(LLMProvider):
                 score=92,
                 status="PASS",
                 feedback="Clear, coherent, and highly structured analytical synthesis.",
+            )
+        if schema.__name__ == "StrategyDecision":
+            from app.orchestration.strategy import ExecutionStrategy, StrategyDecision
+            req_rag = "with knowledge base" in prompt.lower()
+            return StrategyDecision(
+                strategy=ExecutionStrategy.MULTI_AGENT,
+                reasoning="CapturePrompt mock strategy",
+                estimated_complexity="HIGH",
+                requires_rag=req_rag,
             )
         raise ValueError(f"Unexpected schema {schema}")
 
@@ -258,13 +267,13 @@ async def test_orchestrated_pipeline_optional_rag_invoked_only_when_requested():
     # 8: Grounding reached agent prompt for T1 (which had retrieval_query)
     t1_prompts = [p for p in rag_llm.prompts if "Assigned Subtask ID: T1" in p]
     assert len(t1_prompts) == 1
-    assert "Retrieved Knowledge Context (Grounding Evidence)" in t1_prompts[0]
+    assert "KNOWLEDGE BASE CONTEXT:" in t1_prompts[0]
     assert "Bifacial solar panels provide 15% higher energy yield" in t1_prompts[0]
 
     # Grounding NOT in prompt for T2 (which had no retrieval_query)
     t2_prompts = [p for p in rag_llm.prompts if "Assigned Subtask ID: T2" in p]
     assert len(t2_prompts) == 1
-    assert "Retrieved Knowledge Context" not in t2_prompts[0]
+    assert "KNOWLEDGE BASE CONTEXT:" not in t2_prompts[0]
 
 
 @pytest.mark.asyncio
@@ -277,7 +286,7 @@ async def test_orchestrated_pipeline_final_synthesis_incorporates_outputs():
 
     synth_prompts = [p for p in llm.prompts if "Evaluator Score: 92/100" in p]
     assert len(synth_prompts) == 1
-    assert "Summary of Research Subtasks" in synth_prompts[0]
+    assert "Collected Research Subtasks & Findings:" in synth_prompts[0]
     assert "Analyst Agent Findings" in synth_prompts[0]
     assert response.final_answer.startswith("# Final Comprehensive Response")
 
@@ -307,3 +316,88 @@ def test_api_run_endpoint_returns_extended_orchestrated_response(monkeypatch):
     assert data["evaluation"]["score"] is not None
     assert "final_answer" in data
     assert "execution_trace" in data
+
+
+@pytest.mark.asyncio
+async def test_evaluator_triggered_replanning_invokes_correct_research_interface():
+    """Regression test: evaluator failure (<80) triggers replanning using execute_subtask without AttributeError."""
+    class ReplanningLLMProvider(LLMProvider):
+        def __init__(self):
+            self.prompts: List[str] = []
+            self.evaluation_calls = 0
+            self.research_prompts: List[str] = []
+
+        async def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+            self.prompts.append(prompt)
+            sys_lower = (system_prompt or "").lower()
+            if "synthesizer" in sys_lower:
+                return "# Final Response\n\nSynthesized answer including revised findings."
+            if "analyst" in sys_lower:
+                if "Revised research findings" in prompt:
+                    return "Revised analysis synthesis including deep cost breakdown."
+                return "Initial analytical synthesis."
+            if "research" in sys_lower:
+                self.research_prompts.append(prompt)
+                if "Critique: Missing cost breakdown" in prompt:
+                    return "Revised research findings: Deep cost breakdown addressing critique."
+                return "Initial research findings on topic."
+            return "Generic response."
+
+        async def generate_structured(self, prompt: str, schema: Any, system_prompt: Optional[str] = None) -> Any:
+            self.prompts.append(prompt)
+            if schema == PlannerOutput:
+                return PlannerOutput(
+                    tasks=[
+                        TaskNode(id="T1", description="Research cost analysis", type=TaskType.RESEARCH),
+                        TaskNode(id="T2", description="Synthesize cost conclusions", type=TaskType.ANALYSIS, dependencies=["T1"]),
+                    ]
+                )
+            if schema == EvaluationResult:
+                self.evaluation_calls += 1
+                if self.evaluation_calls == 1:
+                    return EvaluationResult(
+                        score=65,
+                        status="FAIL",
+                        feedback="Critique: Missing cost breakdown.",
+                    )
+                return EvaluationResult(
+                    score=88,
+                    status="PASS",
+                    feedback="All requirements satisfied after replanning.",
+                )
+            if schema.__name__ == "StrategyDecision":
+                from app.orchestration.strategy import ExecutionStrategy, StrategyDecision
+                return StrategyDecision(
+                    strategy=ExecutionStrategy.MULTI_AGENT,
+                    reasoning="Complex multi-agent requirement",
+                    estimated_complexity="HIGH",
+                    requires_rag=False,
+                )
+            raise ValueError(f"Unexpected schema: {schema}")
+
+    provider = ReplanningLLMProvider()
+    pipeline = OrchestratedPipeline(llm_provider=provider, settings=settings)
+
+    response = await pipeline.execute("Analyze enterprise cloud migration costs")
+
+    # 1. Verify replanning triggered and completed successfully without AttributeError
+    assert response.replanning_count == 1
+    assert provider.evaluation_calls == 2
+
+    # 2. Verify research prompt in replanning included evaluator critique
+    replan_research_prompts = [p for p in provider.research_prompts if "Critique: Missing cost breakdown" in p]
+    assert len(replan_research_prompts) == 1
+    assert "Assigned Subtask ID: T1" in replan_research_prompts[0]
+
+    # 3. Verify revised research findings were propagated to analyst, evaluation, and response
+    assert response.research_results[0].findings == "Revised research findings: Deep cost breakdown addressing critique."
+    assert "Revised analysis synthesis including deep cost breakdown." in response.analysis
+    assert response.evaluation.score == 88
+    assert response.evaluation.status == "PASS"
+
+    # 4. Verify stage trace records TargetedReplanning stage
+    replan_traces = [t for t in response.execution_trace if t.stage_name == "TargetedReplanning"]
+    assert len(replan_traces) == 1
+    assert replan_traces[0].status == "SUCCESS"
+    assert "Revised evaluation score: 88/100" in replan_traces[0].summary
+

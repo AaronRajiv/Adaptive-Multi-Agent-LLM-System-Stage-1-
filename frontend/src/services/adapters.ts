@@ -131,6 +131,7 @@ export function adaptRun(value: unknown): ExecutionModel {
     chunks,
     finalAnswer: text(r["final_answer"]),
     createdAt: text(r["created_at"]),
+    executionStrategy: text(r["execution_strategy"]) || "MULTI_AGENT",
     dependenciesAvailable:
       rawTasks.some((v) => {
         const t = record(v);

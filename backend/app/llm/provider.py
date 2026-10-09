@@ -109,6 +109,29 @@ class MockLLMProvider(LLMProvider):
             }
             return schema.model_validate(mock_data)
 
+        if schema.__name__ == "StrategyDecision":
+            from app.orchestration.strategy import ExecutionStrategy
+            cleaned = prompt.lower()
+            strat = ExecutionStrategy.MULTI_AGENT
+            req_rag = False
+            # Check user task extracted from prompt
+            task_match = re.search(r'user task:\s*"(.*?)"', cleaned, re.DOTALL)
+            task_content = task_match.group(1).strip() if task_match else cleaned
+            if re.search(r"\b(hello|hi|hey|greetings|howdy)\b", task_content) and len(task_content) < 80:
+                strat = ExecutionStrategy.DIRECT
+            elif re.search(r"\b(draft|write|function|python|code|calc|calculate|math)\b", task_content) and not re.search(r"\b(compare|lifecycle|tradeoff|versus|vs)\b", task_content):
+                strat = ExecutionStrategy.SINGLE_AGENT
+            if "attached documents present: true" in cleaned or "knowledge base" in cleaned:
+                if any(w in task_content for w in ["document", "file", "pdf", "solar", "knowledge base"]):
+                    req_rag = True
+            mock_data = {
+                "strategy": strat.value,
+                "reasoning": "Mock semantic strategy selection for testing.",
+                "estimated_complexity": "HIGH" if strat == ExecutionStrategy.MULTI_AGENT else "LOW",
+                "requires_rag": req_rag,
+            }
+            return schema.model_validate(mock_data)
+
         raise LLMStructuredOutputError(f"MockLLMProvider has no default fixture for schema: {schema.__name__}")
 
 

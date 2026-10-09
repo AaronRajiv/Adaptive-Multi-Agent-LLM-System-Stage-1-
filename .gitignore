@@ -51,3 +51,5 @@ frontend/.dist/
 # Backups & archives
 frontend_backup_*/
 frontend.zip
+*.zip
+scratch/

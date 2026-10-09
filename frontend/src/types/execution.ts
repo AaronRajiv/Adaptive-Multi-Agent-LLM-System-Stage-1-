@@ -28,10 +28,14 @@ export interface ExecutionEvent {
   id: string;
   label: string;
   message: string;
-  source: "CLIENT" | "POST-RUN" | "DEMO";
+  source: "CLIENT" | "POST-RUN" | "DEMO" | "SSE";
   time?: string | undefined;
   durationMs?: number | undefined;
   status?: TaskStatus | undefined;
+  rawType?: string | undefined;
+  taskId?: string | undefined;
+  stage?: string | undefined;
+  payload?: Record<string, unknown> | undefined;
 }
 export interface ExecutionModel {
   runId: string;
@@ -42,4 +46,18 @@ export interface ExecutionModel {
   createdAt?: string | undefined;
   dependenciesAvailable: boolean;
   chunks: ProvenanceChunk[];
+  executionStrategy?: string | undefined;
 }
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  files?: File[] | undefined;
+  events?: ExecutionEvent[] | undefined;
+  error?: string | undefined;
+  running?: boolean | undefined;
+  executionStrategy?: string | undefined;
+}
+
+

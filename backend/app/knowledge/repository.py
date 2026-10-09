@@ -33,6 +33,14 @@ class KnowledgeRepository(ABC):
     async def similarity_search(self, query_embedding: List[float], top_k: int) -> List[RetrievedChunk]:
         """Return the top-k most similar chunks with provenance."""
 
+    async def has_document(self, document_id: str) -> bool:
+        """Check whether a document is already stored in the repository."""
+        return False
+
+    async def delete_document(self, document_id: str) -> None:
+        """Remove a document and all its associated chunks from the repository."""
+        pass
+
 
 class InMemoryKnowledgeRepository(KnowledgeRepository):
     """Deterministic in-memory repository for tests and local development."""
@@ -40,6 +48,18 @@ class InMemoryKnowledgeRepository(KnowledgeRepository):
     def __init__(self) -> None:
         self.documents: Dict[str, KnowledgeDocument] = {}
         self.chunks: Dict[str, StoredKnowledgeChunk] = {}
+
+    async def has_document(self, document_id: str) -> bool:
+        """Check whether a document is already stored in-memory."""
+        return document_id in self.documents
+
+    async def delete_document(self, document_id: str) -> None:
+        """Delete document and its chunks to avoid partial or dirty states."""
+        if document_id in self.documents:
+            del self.documents[document_id]
+        self.chunks = {
+            cid: chunk for cid, chunk in self.chunks.items() if chunk.document_id != document_id
+        }
 
     async def store(
         self,
@@ -131,6 +151,32 @@ class PostgresPgvectorKnowledgeRepository(KnowledgeRepository):
                             _vector_literal(embedding),
                         ),
                     )
+
+    async def has_document(self, document_id: str) -> bool:
+        """Check whether a document is already stored in Postgres."""
+        connection = await self._connect()
+        async with connection:
+            async with connection.cursor() as cursor:
+                await cursor.execute(
+                    "SELECT 1 FROM knowledge_documents WHERE id = %s LIMIT 1",
+                    (document_id,),
+                )
+                row = await cursor.fetchone()
+                return row is not None
+
+    async def delete_document(self, document_id: str) -> None:
+        """Delete a document and all associated chunks from Postgres."""
+        connection = await self._connect()
+        async with connection:
+            async with connection.cursor() as cursor:
+                await cursor.execute(
+                    "DELETE FROM knowledge_chunks WHERE document_id = %s",
+                    (document_id,),
+                )
+                await cursor.execute(
+                    "DELETE FROM knowledge_documents WHERE id = %s",
+                    (document_id,),
+                )
 
     async def similarity_search(self, query_embedding: List[float], top_k: int) -> List[RetrievedChunk]:
         if top_k < 1:

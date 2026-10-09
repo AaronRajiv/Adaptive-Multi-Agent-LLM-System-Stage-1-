@@ -5,24 +5,24 @@ Responsible for crafting the final, polished, user-facing answer incorporating
 the original task, research findings, analytical synthesis, and evaluation feedback.
 """
 
-from typing import List
+from typing import List, Optional
 from app.llm.base import LLMProvider
-from app.models.schemas import EvaluationResult, ResearchResult
+from app.models.schemas import ChatMessagePayload, EvaluationResult, ResearchResult
 
-SYNTHESIZER_SYSTEM_PROMPT = """You are the FINAL SYNTHESIZER AGENT in a baseline multi-agent system.
-Your responsibility is to produce the final, definitive, user-facing answer to the user's initial inquiry.
+SYNTHESIZER_SYSTEM_PROMPT = """You are the FINAL SYNTHESIZER AGENT in an adaptive multi-agent system.
+Your responsibility is to produce the definitive, user-facing answer addressing the user's task.
 
 Inputs available to you:
-1. Original User Task
+1. Original User Task & Conversation History
 2. Key Findings from Research Agents
-3. In-depth Analysis from the Analyst Agent
+3. Analysis from the Analyst Agent
 4. Critique and Quality Score from the Evaluator Agent
 
 Rules:
-1. Deliver a polished, authoritative, well-structured, and complete response.
-2. Incorporate the strengths and address any nuances raised by the Evaluator's critique.
-3. Structure your response with clear headings, executive summary, comprehensive breakdown, practical implications, and a definitive conclusion/recommendation.
-4. Keep the tone professional, objective, and directly tailored to the user's intent.
+1. Deliver a clear, polished, and task-appropriate response.
+2. Address the user's intent directly.
+3. Format your output naturally according to what the task warrants. Do NOT force corporate report headings (such as 'Executive Summary', 'Findings', or 'Conclusion') onto direct answers, simple explanations, content drafting, or conversational questions. Use Markdown structure only when requested or when presenting complex multi-part analyses.
+4. Keep the tone helpful, professional, and aligned with conversation history.
 """
 
 
@@ -38,6 +38,7 @@ class SynthesizerAgent:
         research_results: List[ResearchResult],
         analysis: str,
         evaluation: EvaluationResult,
+        history: Optional[List[ChatMessagePayload]] = None,
     ) -> str:
         """
         Synthesize all intermediate agent outputs into the final user-facing response.
@@ -47,22 +48,29 @@ class SynthesizerAgent:
             research_results: List of ResearchResult objects.
             analysis: The analytical synthesis from AnalystAgent.
             evaluation: The EvaluationResult from EvaluatorAgent.
+            history: Optional conversation history.
 
         Returns:
             The final comprehensive user response string.
         """
-        research_summary = "\n".join(
-            f"- [{r.subtask_id}] {r.subtask_description}: {r.findings[:200]}..."
+        research_summary = "\n\n".join(
+            f"--- [{r.subtask_id}] {r.subtask_description} ---\n{r.findings}"
             for r in research_results
         )
 
+        history_text = ""
+        if history:
+            turns = [f"{msg.role.capitalize()}: {msg.content}" for msg in history]
+            history_text = "Prior Conversation History:\n" + "\n".join(turns) + "\n\n"
+
         prompt = (
-            f"Original User Task:\n\"{user_task.strip()}\"\n\n"
-            f"Summary of Research Subtasks:\n{research_summary}\n\n"
+            f"{history_text}"
+            f"Current User Task:\n\"{user_task.strip()}\"\n\n"
+            f"Collected Research Subtasks & Findings:\n{research_summary}\n\n"
             f"Analyst Agent Findings:\n{analysis}\n\n"
             f"Evaluator Score: {evaluation.score}/100 (Status: {evaluation.status})\n"
             f"Evaluator Feedback:\n{evaluation.feedback}\n\n"
-            f"Please generate the definitive, final user-facing response."
+            f"Please generate the definitive, final user-facing response addressing the current task in light of all evidence and history."
         )
 
         final_response = await self.llm.generate(
@@ -71,3 +79,4 @@ class SynthesizerAgent:
         )
 
         return final_response.strip()
+

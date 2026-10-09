@@ -23,7 +23,7 @@ def test_missing_api_key_error(monkeypatch):
 
 
 def test_empty_or_too_short_task():
-    response = client.post("/api/run", json={"task": "hi"})
+    response = client.post("/api/run", json={"task": "   "})
     assert response.status_code == 422
 
 
