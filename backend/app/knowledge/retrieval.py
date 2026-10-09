@@ -96,12 +96,35 @@ class RetrievalService:
         # 2. Dense Vector Similarity Search
         dense_chunks: List[RetrievedChunk] = []
         try:
+            import time
+            from app.telemetry.metrics import CallMetric, compute_estimated_cost, global_metrics_collector
+
+            t_emb = time.perf_counter()
             try:
                 query_embedding = await self.embedding_provider.embed(
                     clean_query, task_type="RETRIEVAL_QUERY"
                 )
             except TypeError:
                 query_embedding = await self.embedding_provider.embed(clean_query)
+            emb_lat = round((time.perf_counter() - t_emb) * 1000, 2)
+
+            emb_tokens = max(1, len(clean_query.split()))
+            emb_model = getattr(self.embedding_provider, "model", "gemini-embedding-001")
+            run_id = getattr(self, "current_run_id", "retrieval") or "retrieval"
+            global_metrics_collector.record_call(
+                CallMetric(
+                    run_id=run_id,
+                    call_type="embedding",
+                    stage="RAG",
+                    model=emb_model,
+                    tokens_in=emb_tokens,
+                    tokens_out=0,
+                    total_tokens=emb_tokens,
+                    latency_ms=emb_lat,
+                    estimated_cost=compute_estimated_cost(emb_model, emb_tokens, 0),
+                    metadata={"query": clean_query[:100]},
+                )
+            )
 
             dense_chunks = await self.repository.similarity_search(
                 query_embedding, top_k=fetch_k, document_ids=document_ids

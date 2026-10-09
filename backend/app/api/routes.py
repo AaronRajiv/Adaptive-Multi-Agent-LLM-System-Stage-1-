@@ -419,6 +419,30 @@ async def get_run_status(run_id: str):
     )
 
 
+@router.get("/runs/{run_id}/metrics")
+async def get_run_metrics(run_id: str):
+    """Retrieve telemetry metrics (tokens, latency, cost, and call breakdowns) for a run."""
+    from app.telemetry.metrics import global_metrics_collector
+
+    metrics = global_metrics_collector.get_metrics(run_id)
+    if metrics:
+        return metrics.model_dump()
+
+    if run_id in RUNS_INDEX:
+        run_res = RUNS_INDEX[run_id].get("result")
+        if run_res and isinstance(run_res, dict) and run_res.get("metrics"):
+            return run_res["metrics"]
+
+    for r in get_recent_runs():
+        if r.run_id == run_id and r.metrics:
+            return r.metrics
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Metrics for run '{run_id}' not found.",
+    )
+
+
 @router.get("/runs", response_model=List[RunResponse])
 async def list_recent_runs() -> List[RunResponse]:
     """Retrieve in-memory execution traces for recently executed runs."""

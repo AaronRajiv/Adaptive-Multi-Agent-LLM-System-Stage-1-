@@ -176,6 +176,7 @@ class RunResponse(BaseModel):
     task_execution_traces: List[TaskExecutionTrace] = Field(default_factory=list, description="Per-task execution traces from Orchestrator")
     evidence_ledger: Optional[Dict[str, Any]] = Field(default=None, description="Shared canonical Evidence Ledger for the run")
     verification_result: Optional[Dict[str, Any]] = Field(default=None, description="Programmatic grounding verification metrics from verifier")
+    metrics: Optional[Dict[str, Any]] = Field(default=None, description="Per-run resource, token, latency, and cost metrics")
 
 
 class SystemStatusResponse(BaseModel):

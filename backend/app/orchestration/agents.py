@@ -70,6 +70,8 @@ class ResearchTaskAgent(TaskExecutionAgent):
         self.agent = agent
 
     async def execute(self, context: TaskExecutionContext) -> TaskExecutionResult:
+        if hasattr(self.agent.llm, "set_stage"):
+            self.agent.llm.set_stage(f"Research:{context.task.id}")
         user_task = str(context.input_context.get("user_task", context.task.description))
         result = await self.agent.execute_subtask(
             user_task, context.task, retrieved_context=context.retrieved_context
@@ -95,6 +97,8 @@ class AnalysisTaskAgent(TaskExecutionAgent):
         self.agent = agent
 
     async def execute(self, context: TaskExecutionContext) -> TaskExecutionResult:
+        if hasattr(self.agent.llm, "set_stage"):
+            self.agent.llm.set_stage("Analysis")
         user_task = str(context.input_context.get("user_task", context.task.description))
         research_results = [
             ResearchResult(

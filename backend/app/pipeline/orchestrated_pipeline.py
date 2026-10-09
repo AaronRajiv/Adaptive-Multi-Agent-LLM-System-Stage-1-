@@ -42,7 +42,10 @@ from app.orchestration.grounding_verifier import GroundingVerifier, GroundingVer
 from app.orchestration.orchestrator import GraphExecutionStatus, Orchestrator
 from app.logging_config import get_logger
 from app.orchestration.strategy import ExecutionStrategy, StrategySelector
+from app.orchestration.resource_budget import BudgetTracker, ResourceBudgetExceededError, get_budget_for_strategy
 from app.pipeline.baseline_pipeline import record_run
+from app.telemetry.instrumented_provider import InstrumentedLLMProvider
+from app.telemetry.metrics import global_metrics_collector
 
 logger = get_logger("app.pipeline.orchestrated_pipeline")
 
@@ -207,6 +210,22 @@ class OrchestratedPipeline:
                 document_ids=effective_doc_ids or None,
                 history=history,
             )
+        except ResourceBudgetExceededError as rbe:
+            logger.error("Resource budget exceeded for run_id=%s: %s", run_id, str(rbe))
+            await self._emit(
+                ExecutionEventType.RESOURCE_BUDGET_EXCEEDED,
+                message=str(rbe),
+                metadata={
+                    "limit_type": rbe.limit_type,
+                    "current_value": rbe.current_value,
+                    "limit_value": rbe.limit_value,
+                },
+            )
+            await self._emit(
+                ExecutionEventType.RUN_FAILED,
+                message=f"Pipeline failed: {rbe}",
+            )
+            raise
         except Exception as exc:
             logger.error("Pipeline execution failed for run_id=%s: %s", run_id, str(exc), exc_info=True)
             await self._emit(
@@ -229,30 +248,65 @@ class OrchestratedPipeline:
         document_ids: Optional[List[str]] = None,
         history: Optional[List[Any]] = None,
     ) -> RunResponse:
-        """Inner execution logic supporting DIRECT, SINGLE_AGENT, and MULTI_AGENT strategies."""
+        """Inner execution logic supporting DIRECT, SINGLE_AGENT, SINGLE_AGENT_RAG, and MULTI_AGENT strategies."""
+        t_run_start = time.perf_counter()
+
+        # Wrap LLM provider with telemetry instrumentation & budget tracker for this run
+        instrumented_llm = InstrumentedLLMProvider(
+            base_provider=self.llm,
+            run_id=run_id,
+            metrics_collector=global_metrics_collector,
+            model_name=getattr(self.settings, "llm_model", "gemini-3.1-flash-lite"),
+        )
+        self.strategy_selector.llm = instrumented_llm
+        self.planner.llm = instrumented_llm
+        self.researcher.llm = instrumented_llm
+        self.analyst.llm = instrumented_llm
+        self.evaluator.llm = instrumented_llm
+        self.synthesizer.llm = instrumented_llm
+
+        if self.retrieval_service:
+            self.retrieval_service.current_run_id = run_id
 
         # -------------------------------------------------------------
         # Stage 0: Adaptive Strategy Selection
         # -------------------------------------------------------------
+        instrumented_llm.set_stage("StrategySelection")
         decision = await self.strategy_selector.select_strategy(
             user_task, history=history, has_documents=has_documents
         )
 
+        # Allocate and enforce strategy resource budget
+        budget = get_budget_for_strategy(decision.strategy, self.settings)
+        budget_tracker = BudgetTracker(budget)
+        instrumented_llm.budget_tracker = budget_tracker
+        decision.budget = budget.model_dump()
+
+        strategy_meta = {
+            "strategy": decision.strategy.value,
+            "reasoning": decision.reasoning,
+            "estimated_complexity": decision.estimated_complexity,
+            "requires_rag": decision.requires_rag,
+            "domains": decision.domains,
+            "cross_document_reasoning": decision.cross_document_reasoning,
+            "budget": decision.budget,
+        }
+        await self._emit(
+            ExecutionEventType.STRATEGY_DECIDED,
+            message=f"Strategy decided: {decision.strategy.value} ({decision.reasoning})",
+            metadata=strategy_meta,
+        )
         await self._emit(
             ExecutionEventType.STRATEGY_SELECTED,
             message=f"Strategy selected: {decision.strategy.value} ({decision.reasoning})",
-            metadata={
-                "strategy": decision.strategy.value,
-                "reasoning": decision.reasoning,
-                "estimated_complexity": decision.estimated_complexity,
-                "requires_rag": decision.requires_rag,
-            },
+            metadata=strategy_meta,
         )
 
         # =============================================================
         # STRATEGY 1: DIRECT Conversational Response
         # =============================================================
         if decision.strategy == ExecutionStrategy.DIRECT:
+            instrumented_llm.set_stage("Synthesis")
             t0 = time.perf_counter()
             await self._emit(ExecutionEventType.SYNTHESIS_STARTED, message="Generating direct response.")
 
@@ -262,7 +316,7 @@ class OrchestratedPipeline:
                 history_text = "Prior Conversation History:\n" + "\n".join(turns) + "\n\n"
 
             direct_prompt = f"{history_text}User: {user_task.strip()}\nAssistant:"
-            direct_answer = await self.llm.generate(
+            direct_answer = await instrumented_llm.generate(
                 prompt=direct_prompt,
                 system_prompt="You are a helpful, friendly AI assistant. Provide a concise, natural response without unnecessary markdown report headers or meta-analysis."
             )
@@ -284,6 +338,9 @@ class OrchestratedPipeline:
                 )
             )
 
+            total_wall_ms = round((time.perf_counter() - t_run_start) * 1000, 2)
+            run_metrics = global_metrics_collector.finalize_run(run_id, wall_time_ms=total_wall_ms, strategy="DIRECT")
+
             response = RunResponse(
                 run_id=run_id,
                 user_task=user_task,
@@ -299,17 +356,20 @@ class OrchestratedPipeline:
                 task_graph=TaskGraph(tasks=[]),
                 retrieved_chunks=[],
                 task_execution_traces=[],
+                metrics=run_metrics.model_dump(),
             )
             record_run(response)
             await self._emit(ExecutionEventType.RUN_COMPLETED, message=f"Pipeline completed (DIRECT). Run ID: {run_id}")
             return response
 
         # =============================================================
-        # STRATEGY 2: SINGLE_AGENT Execution
+        # STRATEGY 2: SINGLE_AGENT & SINGLE_AGENT_RAG Execution
         # =============================================================
-        elif decision.strategy == ExecutionStrategy.SINGLE_AGENT:
+        elif decision.strategy in (ExecutionStrategy.SINGLE_AGENT, ExecutionStrategy.SINGLE_AGENT_RAG):
+            strategy_name = decision.strategy.value
+            is_rag = decision.strategy == ExecutionStrategy.SINGLE_AGENT_RAG or decision.requires_rag
             t0 = time.perf_counter()
-            await self._emit(ExecutionEventType.PLANNING_STARTED, message="Single-agent strategy selected.")
+            await self._emit(ExecutionEventType.PLANNING_STARTED, message=f"{strategy_name} strategy selected.")
 
             task_node = TaskNode(
                 id="T1",
@@ -327,7 +387,8 @@ class OrchestratedPipeline:
 
             retrieved_chunks_collected: List[RetrievedChunk] = []
             retrieval_context_prompt = ""
-            if decision.requires_rag:
+            if is_rag:
+                instrumented_llm.set_stage("RAG")
                 if not self.retrieval_service:
                     err_msg = "Task requires RAG retrieval but retrieval service is not available."
                     logger.error(err_msg)
@@ -347,6 +408,7 @@ class OrchestratedPipeline:
                     await self._emit(ExecutionEventType.RUN_FAILED, message=err_msg)
                     raise RuntimeError(err_msg) from exc
 
+            instrumented_llm.set_stage("Synthesis")
             await self._emit(ExecutionEventType.SYNTHESIS_STARTED, message="Generating single-agent response.")
             history_text = ""
             if history:
@@ -354,7 +416,7 @@ class OrchestratedPipeline:
                 history_text = "Prior Conversation History:\n" + "\n".join(turns) + "\n\n"
 
             single_prompt = f"{history_text}{retrieval_context_prompt}User Task:\n\"{user_task.strip()}\"\n\nPlease provide a clear, accurate, direct response."
-            single_answer = await self.llm.generate(
+            single_answer = await instrumented_llm.generate(
                 prompt=single_prompt,
                 system_prompt="You are a helpful, expert AI assistant. Deliver an accurate, well-structured response directly matching the user's intent."
             )
@@ -372,14 +434,17 @@ class OrchestratedPipeline:
                     agent_name="TaskExecutionAgent",
                     duration_ms=dur,
                     status="SUCCESS",
-                    summary="Executed single-agent strategy."
+                    summary=f"Executed {strategy_name} strategy."
                 )
             )
+
+            total_wall_ms = round((time.perf_counter() - t_run_start) * 1000, 2)
+            run_metrics = global_metrics_collector.finalize_run(run_id, wall_time_ms=total_wall_ms, strategy=strategy_name)
 
             response = RunResponse(
                 run_id=run_id,
                 user_task=user_task,
-                execution_strategy="SINGLE_AGENT",
+                execution_strategy=strategy_name,
                 replanning_count=0,
                 subtasks=single_graph.tasks,
                 research_results=[
@@ -393,14 +458,16 @@ class OrchestratedPipeline:
                 task_graph=single_graph,
                 retrieved_chunks=retrieved_chunks_collected,
                 task_execution_traces=[],
+                metrics=run_metrics.model_dump(),
             )
             record_run(response)
-            await self._emit(ExecutionEventType.RUN_COMPLETED, message=f"Pipeline completed (SINGLE_AGENT). Run ID: {run_id}")
+            await self._emit(ExecutionEventType.RUN_COMPLETED, message=f"Pipeline completed ({strategy_name}). Run ID: {run_id}")
             return response
 
         # =============================================================
         # STRATEGY 3: MULTI_AGENT Orchestrated Decomposition & Replanning
         # =============================================================
+        instrumented_llm.set_stage("Planning")
         await self._emit(ExecutionEventType.PLANNING_STARTED, message="Multi-agent planning started.")
         t0 = time.perf_counter()
 
@@ -453,6 +520,7 @@ class OrchestratedPipeline:
             evidence_ledger=evidence_ledger,
         )
 
+        instrumented_llm.set_stage("Research")
         t_orch = time.perf_counter()
         exec_result = await orchestrator.execute(
             graph, input_context={"user_task": user_task, "document_ids": document_ids}
@@ -508,6 +576,7 @@ class OrchestratedPipeline:
             )
         )
 
+        instrumented_llm.set_stage("Analysis")
         t_ana = time.perf_counter()
         if analysis_outputs:
             analysis_text = "\n\n".join(analysis_outputs)
@@ -531,6 +600,7 @@ class OrchestratedPipeline:
         )
 
         # Stage 5: Evaluator Agent Audit
+        instrumented_llm.set_stage("Evaluation")
         await self._emit(ExecutionEventType.EVALUATION_STARTED, message="Evaluation started.")
         t_eval = time.perf_counter()
         evaluation_output = await self.evaluator.evaluate(
@@ -555,6 +625,7 @@ class OrchestratedPipeline:
         )
 
         # Stage 6: Synthesis Agent (incorporates analysis + evaluation feedback)
+        instrumented_llm.set_stage("Synthesis")
         await self._emit(ExecutionEventType.SYNTHESIS_STARTED, message="Synthesis started.")
         t_synth = time.perf_counter()
         final_answer = await self.synthesizer.synthesize(
@@ -628,6 +699,7 @@ class OrchestratedPipeline:
             await self._emit(ExecutionEventType.REPLANNING_STARTED, message=replan_msg, metadata=replan_start_meta)
             await self._emit(ExecutionEventType.REPLAN_STARTED, message=replan_msg, metadata=replan_start_meta)
 
+            instrumented_llm.set_stage("Replanning")
             t_replan = time.perf_counter()
 
             # Execute targeted retrieval query refinement and re-run targeted subtasks
@@ -745,6 +817,9 @@ class OrchestratedPipeline:
             if evaluation_output.status == "PASS" and (not verifier_result or verifier_result.passed):
                 break
 
+        total_wall_ms = round((time.perf_counter() - t_run_start) * 1000, 2)
+        run_metrics = global_metrics_collector.finalize_run(run_id, wall_time_ms=total_wall_ms, strategy="MULTI_AGENT")
+
         response = RunResponse(
             run_id=run_id,
             user_task=user_task,
@@ -762,6 +837,7 @@ class OrchestratedPipeline:
             task_execution_traces=exec_result.execution_trace,
             evidence_ledger=evidence_ledger.model_dump(),
             verification_result=verifier_result.model_dump() if verifier_result else None,
+            metrics=run_metrics.model_dump(),
         )
 
         record_run(response)

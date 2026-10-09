@@ -200,11 +200,15 @@ class MockLLMProvider(LLMProvider):
             if "attached documents present: true" in cleaned or "knowledge base" in cleaned:
                 if any(w in task_content for w in ["document", "file", "pdf", "solar", "knowledge base"]):
                     req_rag = True
+            has_cross_doc = bool(re.search(r"\b(compare|cross-reference|between|tradeoff|versus|vs)\b", task_content))
+            domains_found = [w for w in ["aerodynamics", "mass", "suspension", "solar", "cost", "financial", "regulations"] if w in task_content]
             mock_data = {
                 "strategy": strat.value,
                 "reasoning": "Mock semantic strategy selection for testing.",
                 "estimated_complexity": "HIGH" if strat == ExecutionStrategy.MULTI_AGENT else "LOW",
                 "requires_rag": req_rag,
+                "domains": domains_found,
+                "cross_document_reasoning": has_cross_doc,
             }
             return schema.model_validate(mock_data)
 
@@ -292,6 +296,7 @@ class GeminiProvider(LLMProvider):
                     )
 
                 res_data = response.json()
+                self.last_usage = res_data.get("usageMetadata", {})
                 candidates = res_data.get("candidates", [])
                 if not candidates:
                     logger.error("Gemini API returned no candidates.")
@@ -392,6 +397,7 @@ class GeminiProvider(LLMProvider):
                     raise LLMProviderError(f"Gemini API structured call failed (HTTP {response.status_code}): {err_msg}")
 
                 res_data = response.json()
+                self.last_usage = res_data.get("usageMetadata", {})
                 candidates = res_data.get("candidates", [])
                 if not candidates:
                     raise LLMProviderError("Gemini API returned no candidates.")
