@@ -12,7 +12,8 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
 
 from app.config import settings
-from app.events import event_bus_registry
+from app.events import ExecutionEvent, ExecutionEventType, event_bus_registry
+from app.persistence.run_repository import get_run_repository
 from app.knowledge.document_service import (
     DocumentEvent,
     DocumentMetadata,
@@ -221,23 +222,29 @@ async def stream_document_events(document_id: str):
 # Pipeline Execution Endpoints
 # =====================================================================
 
+ACTIVE_RUN_TASKS: Dict[str, asyncio.Task] = {}
+
 
 async def _run_async_worker(
     pipeline: OrchestratedPipeline, request: RunRequest, run_id: str
 ) -> None:
-    """Background worker for asynchronous pipeline execution."""
+    """Background worker for asynchronous pipeline execution with timeout, cancel handling, and persistence."""
     RUNS_INDEX[run_id] = {
         "run_id": run_id,
         "status": "running",
         "result": None,
         "error": None,
     }
+    run_repo = get_run_repository(settings)
     try:
-        result = await pipeline.execute(
-            request.task.strip(),
-            documents=request.documents,
-            document_ids=request.document_ids,
-            history=request.history,
+        result = await asyncio.wait_for(
+            pipeline.execute(
+                request.task.strip(),
+                documents=request.documents,
+                document_ids=request.document_ids,
+                history=request.history,
+            ),
+            timeout=settings.run_timeout_seconds,
         )
         RUNS_INDEX[run_id] = {
             "run_id": run_id,
@@ -245,6 +252,42 @@ async def _run_async_worker(
             "result": result.model_dump(),
             "error": None,
         }
+        await run_repo.save_run(result)
+        if result.metrics:
+            from app.telemetry.metrics import global_metrics_collector
+            m = global_metrics_collector.get_metrics(run_id)
+            if m:
+                await run_repo.save_metrics(m)
+    except asyncio.CancelledError:
+        logger.warning("Pipeline execution cancelled for run_id=%s", run_id)
+        RUNS_INDEX[run_id] = {
+            "run_id": run_id,
+            "status": "cancelled",
+            "result": None,
+            "error": "Pipeline execution cancelled by client.",
+        }
+    except asyncio.TimeoutError:
+        logger.error(
+            "Pipeline execution timed out for run_id=%s after %ss",
+            run_id,
+            settings.run_timeout_seconds,
+        )
+        RUNS_INDEX[run_id] = {
+            "run_id": run_id,
+            "status": "failed",
+            "result": None,
+            "error": f"Pipeline execution timed out after {settings.run_timeout_seconds} seconds.",
+        }
+        bus = await event_bus_registry.get(run_id)
+        if bus:
+            await bus.emit(
+                ExecutionEvent(
+                    run_id=run_id,
+                    event_type=ExecutionEventType.RUN_FAILED,
+                    source="TIMEOUT",
+                    data={"error": f"Execution timed out after {settings.run_timeout_seconds}s"},
+                )
+            )
     except Exception as exc:
         logger.error(
             "Async pipeline execution failed for run_id=%s: %s",
@@ -258,19 +301,28 @@ async def _run_async_worker(
             "result": None,
             "error": str(exc),
         }
+    finally:
+        ACTIVE_RUN_TASKS.pop(run_id, None)
 
 
 @router.post("/run")
 async def run_pipeline(request: RunRequest):
     """
     Execute the Orchestrated Multi-Agent Pipeline.
-    Supports document_ids filtering, legacy documents ingestion, and async_run mode.
+    Supports concurrency throttling, per-run timeout, cancel registration, and persistence.
     """
     task_text = request.task.strip()
     if not task_text:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Task prompt cannot be empty. Please provide a task or question.",
+        )
+
+    # Concurrency limit enforcement
+    if len(ACTIVE_RUN_TASKS) >= settings.max_concurrent_runs:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Server is currently processing maximum concurrent runs ({settings.max_concurrent_runs}). Please try again shortly.",
         )
 
     # Validate referenced document_ids readiness before starting
@@ -326,7 +378,8 @@ async def run_pipeline(request: RunRequest):
             "result": None,
             "error": None,
         }
-        asyncio.create_task(_run_async_worker(pipeline, request, run_id))
+        task = asyncio.create_task(_run_async_worker(pipeline, request, run_id))
+        ACTIVE_RUN_TASKS[run_id] = task
         return AsyncRunResponse(
             run_id=run_id,
             status="started",
@@ -334,12 +387,19 @@ async def run_pipeline(request: RunRequest):
         )
 
     # Synchronous execution mode (for backward compatibility and test suites)
+    current_task = asyncio.current_task()
+    if current_task:
+        ACTIVE_RUN_TASKS[run_id] = current_task
+
     try:
-        result = await pipeline.execute(
-            task_text,
-            documents=request.documents,
-            document_ids=request.document_ids,
-            history=request.history,
+        result = await asyncio.wait_for(
+            pipeline.execute(
+                task_text,
+                documents=request.documents,
+                document_ids=request.document_ids,
+                history=request.history,
+            ),
+            timeout=settings.run_timeout_seconds,
         )
         RUNS_INDEX[run_id] = {
             "run_id": run_id,
@@ -347,12 +407,51 @@ async def run_pipeline(request: RunRequest):
             "result": result.model_dump(),
             "error": None,
         }
+        run_repo = get_run_repository(settings)
+        await run_repo.save_run(result)
+        if result.metrics:
+            from app.telemetry.metrics import global_metrics_collector
+            m = global_metrics_collector.get_metrics(run_id)
+            if m:
+                await run_repo.save_metrics(m)
+
         logger.info(
             "Pipeline completed successfully for run_id=%s, strategy=%s",
             run_id,
             result.execution_strategy,
         )
         return result
+    except asyncio.CancelledError:
+        logger.warning("Synchronous pipeline execution cancelled for run_id=%s", run_id)
+        RUNS_INDEX[run_id] = {
+            "run_id": run_id,
+            "status": "cancelled",
+            "result": None,
+            "error": "Pipeline execution cancelled by client.",
+        }
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Pipeline execution cancelled by client.",
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            "Synchronous pipeline execution timed out for run_id=%s after %ss",
+            run_id,
+            settings.run_timeout_seconds,
+        )
+        RUNS_INDEX[run_id] = {
+            "run_id": run_id,
+            "status": "failed",
+            "result": None,
+            "error": f"Pipeline execution timed out after {settings.run_timeout_seconds} seconds.",
+        }
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail={
+                "error_type": "TimeoutError",
+                "message": f"Pipeline execution timed out after {settings.run_timeout_seconds} seconds.",
+            },
+        )
     except LLMStructuredOutputError as e:
         logger.error("Structured output validation failed for run_id=%s: %s", run_id, str(e))
         RUNS_INDEX[run_id] = {
@@ -398,6 +497,48 @@ async def run_pipeline(request: RunRequest):
                 "message": f"An unexpected pipeline error occurred: {str(e)}",
             },
         )
+    finally:
+        ACTIVE_RUN_TASKS.pop(run_id, None)
+
+
+@router.post("/runs/{run_id}/cancel")
+async def cancel_run(run_id: str):
+    """Cancel an active pipeline execution by run_id."""
+    task = ACTIVE_RUN_TASKS.get(run_id)
+    if not task or task.done():
+        if run_id in RUNS_INDEX:
+            return {
+                "run_id": run_id,
+                "status": RUNS_INDEX[run_id]["status"],
+                "message": f"Run '{run_id}' is already {RUNS_INDEX[run_id]['status']}.",
+            }
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Active run '{run_id}' not found or already terminated.",
+        )
+
+    task.cancel()
+    RUNS_INDEX[run_id] = {
+        "run_id": run_id,
+        "status": "cancelled",
+        "result": None,
+        "error": "Execution cancelled by user request.",
+    }
+    bus = await event_bus_registry.get(run_id)
+    if bus:
+        await bus.emit(
+            ExecutionEvent(
+                run_id=run_id,
+                event_type=ExecutionEventType.RUN_FAILED,
+                source="USER",
+                data={"error": "Pipeline execution cancelled by user request."},
+            )
+        )
+    return {
+        "run_id": run_id,
+        "status": "cancelled",
+        "message": "Pipeline execution successfully cancelled.",
+    }
 
 
 @router.get("/runs/{run_id}")
@@ -405,6 +546,17 @@ async def get_run_status(run_id: str):
     """Retrieve run execution status or completed RunResponse by run_id."""
     if run_id in RUNS_INDEX:
         return RUNS_INDEX[run_id]
+
+    run_repo = get_run_repository(settings)
+    stored = await run_repo.get_run(run_id)
+    if stored:
+        return {
+            "run_id": run_id,
+            "status": "completed",
+            "result": stored.model_dump(),
+            "error": None,
+        }
+
     for r in get_recent_runs():
         if r.run_id == run_id:
             return {
@@ -428,6 +580,11 @@ async def get_run_metrics(run_id: str):
     if metrics:
         return metrics.model_dump()
 
+    run_repo = get_run_repository(settings)
+    stored_metrics = await run_repo.get_metrics(run_id)
+    if stored_metrics:
+        return stored_metrics.model_dump()
+
     if run_id in RUNS_INDEX:
         run_res = RUNS_INDEX[run_id].get("result")
         if run_res and isinstance(run_res, dict) and run_res.get("metrics"):
@@ -445,7 +602,11 @@ async def get_run_metrics(run_id: str):
 
 @router.get("/runs", response_model=List[RunResponse])
 async def list_recent_runs() -> List[RunResponse]:
-    """Retrieve in-memory execution traces for recently executed runs."""
+    """Retrieve execution traces for recently executed runs."""
+    run_repo = get_run_repository(settings)
+    repo_runs = await run_repo.list_runs()
+    if repo_runs:
+        return repo_runs
     return get_recent_runs()
 
 

@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     budget_multi_agent_max_tokens: int = Field(default=80000, ge=1000, description="Max tokens for MULTI_AGENT strategy")
     budget_multi_agent_max_wall_time_seconds: float = Field(default=240.0, ge=1.0, description="Max wall time in seconds for MULTI_AGENT strategy")
 
+    # Reliability and Persistence configuration
+    max_concurrent_runs: int = Field(default=5, ge=1, le=50, description="Maximum concurrent pipeline execution runs allowed")
+    run_timeout_seconds: float = Field(default=180.0, ge=1.0, description="Global execution timeout in seconds per pipeline run")
+    database_url: str = Field(default="", description="Optional PostgreSQL connection URL for runs and metrics persistence")
+
     # Server / Network configuration
     cors_origins: str = Field(
         default="http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173",
