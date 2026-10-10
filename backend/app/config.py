@@ -4,16 +4,19 @@ Application Configuration Module for Stage 1 Baseline Multi-Agent System.
 Uses pydantic-settings to manage environment variables cleanly.
 """
 
+from pathlib import Path
 from typing import List
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
     """System settings loaded from environment variables or .env file."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(".env", "backend/.env", str(_BASE_DIR / ".env")),
         env_file_encoding="utf-8",
         extra="ignore"
     )
