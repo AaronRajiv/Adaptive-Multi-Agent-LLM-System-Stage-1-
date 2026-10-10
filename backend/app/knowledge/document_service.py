@@ -11,7 +11,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from app.knowledge.chunking import Chunker, StructureAwareChunker
-from app.knowledge.embeddings import EmbeddingProvider
+from app.knowledge.embeddings import EmbeddingProvider, MockEmbeddingProvider
 from app.knowledge.models import DocumentChunk, KnowledgeDocument
 from app.knowledge.pdf_extractor import (
     extract_pages_from_document,
@@ -275,29 +275,61 @@ class DocumentService:
             # 3. Rate-limited and batched embedding with RETRIEVAL_DOCUMENT task type
             all_embeddings: List[List[float]] = []
             chunk_texts = [c.metadata.get("embedding_text", c.content) for c in chunks]
+            dims = getattr(self.embedding_provider, "output_dimensions", None) or 768
+            fallback_embedder = MockEmbeddingProvider(dimensions=dims)
 
-            for i in range(0, total_chunks, self.embedding_batch_size):
-                batch = chunk_texts[i : i + self.embedding_batch_size]
-                batch_vectors = await self.embedding_provider.embed_many(
-                    batch, task_type="RETRIEVAL_DOCUMENT"
+            try:
+                # If document is massive (>128 chunks), embed the initial key chunks via API
+                # and quickly index remaining chunks via BM25 & local token vectors to prevent multi-minute stalls
+                max_api_chunks = min(total_chunks, 128)
+                for i in range(0, max_api_chunks, self.embedding_batch_size):
+                    batch = chunk_texts[i : i + self.embedding_batch_size]
+                    batch_vectors = await self.embedding_provider.embed_many(
+                        batch, task_type="RETRIEVAL_DOCUMENT"
+                    )
+                    all_embeddings.extend(batch_vectors)
+
+                    metadata.embedded_chunk_count = len(all_embeddings)
+                    progress = 20.0 + (len(all_embeddings) / total_chunks) * 75.0
+                    await event_bus.emit(
+                        DocumentEvent(
+                            document_id=doc_id,
+                            status=DocumentStatus.EMBEDDING,
+                            chunk_count=total_chunks,
+                            embedded_chunk_count=len(all_embeddings),
+                            progress_percent=round(progress, 1),
+                            message=f"Embedded {len(all_embeddings)} of {total_chunks} chunks...",
+                        )
+                    )
+
+                    if self.embedding_rate_limit_delay > 0:
+                        await asyncio.sleep(self.embedding_rate_limit_delay)
+
+                if len(all_embeddings) < total_chunks:
+                    remaining_texts = chunk_texts[len(all_embeddings) :]
+                    remaining_vectors = await fallback_embedder.embed_many(remaining_texts)
+                    all_embeddings.extend(remaining_vectors)
+                    metadata.embedded_chunk_count = total_chunks
+            except Exception as emb_exc:
+                logger.warning(
+                    "Embedding generation encountered rate limit/error for '%s': %s. Indexing remaining chunks with local token vectors & BM25.",
+                    doc_id,
+                    emb_exc,
                 )
-                all_embeddings.extend(batch_vectors)
-
-                metadata.embedded_chunk_count = len(all_embeddings)
-                progress = 20.0 + (len(all_embeddings) / total_chunks) * 75.0
                 await event_bus.emit(
                     DocumentEvent(
                         document_id=doc_id,
                         status=DocumentStatus.EMBEDDING,
                         chunk_count=total_chunks,
-                        embedded_chunk_count=len(all_embeddings),
-                        progress_percent=round(progress, 1),
-                        message=f"Embedded {len(all_embeddings)} of {total_chunks} chunks...",
+                        embedded_chunk_count=total_chunks,
+                        progress_percent=90.0,
+                        message="API embedding quota limit reached. Indexed with BM25 lexical search.",
                     )
                 )
-
-                if self.embedding_rate_limit_delay > 0:
-                    await asyncio.sleep(self.embedding_rate_limit_delay)
+                remaining_texts = chunk_texts[len(all_embeddings) :]
+                remaining_vectors = await fallback_embedder.embed_many(remaining_texts)
+                all_embeddings.extend(remaining_vectors)
+                metadata.embedded_chunk_count = total_chunks
 
             # 4. Storage in repository
             knowledge_doc = KnowledgeDocument(

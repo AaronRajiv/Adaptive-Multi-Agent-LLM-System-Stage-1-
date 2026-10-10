@@ -8,6 +8,10 @@ from typing import List
 
 import httpx
 
+from app.logging_config import get_logger
+
+logger = get_logger("app.knowledge.embeddings")
+
 
 class EmbeddingError(RuntimeError):
     """Raised when text cannot be embedded by the configured provider."""
@@ -110,9 +114,10 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         return all_vectors
 
     async def _embed_batch_with_retry(
-        self, batch_texts: List[str], task_type: str | None = None, max_retries: int = 3
+        self, batch_texts: List[str], task_type: str | None = None, max_retries: int = 5
     ) -> List[List[float]]:
         import asyncio
+        import re
 
         url = f"{self.base_url}/{self.model}:batchEmbedContents"
         formatted_model = f"models/{self.model}" if not self.model.startswith("models/") else self.model
@@ -154,9 +159,29 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
                         f"Expected {len(batch_texts)} embedding vectors, but received {len(vectors)}."
                     )
 
-                # Transient rate-limit or temporary server issues: retry with exponential backoff
-                if response.status_code in (429, 500, 503) and attempt < max_retries - 1:
-                    await asyncio.sleep(1.0 * (2 ** attempt))
+                # Rate limit (429): immediately raise EmbeddingError to trigger fast fallback without blocking
+                if response.status_code == 429:
+                    err_text = response.text
+                    try:
+                        err_json = response.json()
+                        err_text = err_json.get("error", {}).get("message", err_text)
+                    except Exception:
+                        pass
+                    raise EmbeddingError(
+                        f"Gemini embedding API quota exceeded (HTTP 429): {err_text}"
+                    )
+
+                # Transient server issues (500, 503): retry with exponential backoff
+                if response.status_code in (500, 503) and attempt < max_retries - 1:
+                    sleep_secs = 1.0 * (2 ** attempt)
+                    logger.warning(
+                        "Gemini embedding API transient error (HTTP %d) on attempt %d/%d. Retrying in %.1fs...",
+                        response.status_code,
+                        attempt + 1,
+                        max_retries,
+                        sleep_secs,
+                    )
+                    await asyncio.sleep(sleep_secs)
                     continue
 
                 # Permanent error or retries exhausted
@@ -172,7 +197,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
 
             except httpx.RequestError as exc:
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(1.0 * (2 ** attempt))
+                    await asyncio.sleep(2.0 * (attempt + 1))
                     continue
                 raise EmbeddingError(
                     f"Network error connecting to Gemini embedding API after {max_retries} attempts: {exc}"

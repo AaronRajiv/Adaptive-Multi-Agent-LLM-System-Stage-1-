@@ -182,67 +182,6 @@ export function ControlPlane() {
 
       setMessages((prev) => [...prev, userMsg, assistantMsg]);
 
-      // Upload attached files to document service and obtain document_ids
-      const attachedDocIds: string[] = [];
-      if (files && files.length > 0) {
-        for (const f of files) {
-          try {
-            const uploadEv = createClientEvent(
-              "DOC_UPLOAD",
-              `Uploading '${f.name}' to document service...`,
-              "RUNNING"
-            );
-            setEvents((prev) => [...prev, uploadEv]);
-            const uploadRes = await uploadDocument(f, f.name);
-            attachedDocIds.push(uploadRes.document_id);
-
-            if (uploadRes.status !== "ready") {
-              const pollDocInterval = 600;
-              for (let d = 0; d < 100; d++) {
-                await new Promise((r) => setTimeout(r, pollDocInterval));
-                const docStatus = await fetchDocumentStatus(uploadRes.document_id);
-                if (docStatus.status === "ready") {
-                  setEvents((prev) => [
-                    ...prev,
-                    createClientEvent(
-                      "DOC_READY",
-                      `'${f.name}' processed & ready (${docStatus.chunk_count} chunks).`,
-                      "COMPLETED"
-                    ),
-                  ]);
-                  break;
-                }
-                if (docStatus.status === "failed") {
-                  throw new Error(
-                    `Document ingestion failed for '${f.name}': ${docStatus.error_message || "Unknown error"}`
-                  );
-                }
-              }
-            } else {
-              setEvents((prev) => [
-                ...prev,
-                createClientEvent(
-                  "DOC_READY",
-                  `'${f.name}' already ingested (deduplicated by SHA-256).`,
-                  "COMPLETED"
-                ),
-              ]);
-            }
-          } catch (e) {
-            console.error("Document upload error:", e);
-            throw e;
-          }
-        }
-      }
-
-      const runId =
-        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-          ? crypto.randomUUID()
-          : `run-${Date.now()}`;
-      currentActiveRunId.current = runId;
-
-      const allDocIds = Array.from(new Set([...selectedDocIds, ...attachedDocIds]));
-
       let liveState: LiveExecutionState = {
         running: true,
         tasks: [],
@@ -250,36 +189,119 @@ export function ControlPlane() {
         chunks: [],
       };
 
+      const updateLiveEvents = (newEvent: ExecutionEvent) => {
+        liveState = {
+          ...liveState,
+          events: [...liveState.events, newEvent],
+        };
+        setEvents([...liveState.events]);
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantMsgId ? { ...msg, events: [...liveState.events] } : msg
+          )
+        );
+      };
+
+      let unsubscribe: () => void = () => {};
       let currentArch = createInitialArchitectureState();
-      const initialEv = createClientEvent("RUN_STARTED", "Pipeline execution started", "RUNNING");
-      currentArch = updateArchitectureFromEvent(currentArch, initialEv);
-
-      setEvents(liveState.events);
-      setLiveTasks(liveState.tasks);
-      setArchState(currentArch);
-
-      const sseSource = new ServerExecutionEventSource(runId);
-      const unsubscribe = sseSource.subscribe(
-        (ev) => {
-          if (!mounted.current || id !== requestId.current) return;
-
-          liveState = processExecutionEvent(liveState, ev);
-          currentArch = updateArchitectureFromEvent(currentArch, ev);
-
-          setEvents([...liveState.events]);
-          setLiveTasks([...liveState.tasks]);
-          setArchState({ ...currentArch });
-
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantMsgId ? { ...msg, events: [...liveState.events] } : msg
-            )
-          );
-        },
-        () => {}
-      );
 
       try {
+        // Upload attached files to document service and obtain document_ids
+        const attachedDocIds: string[] = [];
+        if (files && files.length > 0) {
+          for (const f of files) {
+            updateLiveEvents(
+              createClientEvent("DOC_UPLOAD", `Uploading '${f.name}' to document service...`, "RUNNING")
+            );
+            const uploadRes = await uploadDocument(f, f.name);
+            attachedDocIds.push(uploadRes.document_id);
+
+            if (uploadRes.status !== "ready") {
+              const pollDocInterval = 800;
+              let isDocReady = false;
+              for (let d = 0; d < 300; d++) {
+                await new Promise((r) => setTimeout(r, pollDocInterval));
+                const docStatus = await fetchDocumentStatus(uploadRes.document_id);
+                if (docStatus.status === "ready") {
+                  updateLiveEvents(
+                    createClientEvent(
+                      "DOC_READY",
+                      `'${f.name}' processed & ready (${docStatus.chunk_count} chunks indexed).`,
+                      "COMPLETED"
+                    )
+                  );
+                  isDocReady = true;
+                  break;
+                }
+                if (docStatus.status === "failed") {
+                  throw new Error(
+                    `Document ingestion failed for '${f.name}': ${docStatus.error_message || "Unknown error"}`
+                  );
+                }
+                if (docStatus.status === "extracting") {
+                  updateLiveEvents(
+                    createClientEvent("DOC_EXTRACTING", `Extracting text from '${f.name}'...`, "RUNNING")
+                  );
+                } else if (docStatus.status === "embedding") {
+                  updateLiveEvents(
+                    createClientEvent(
+                      "DOC_EMBEDDING",
+                      `Indexing '${f.name}' (${docStatus.embedded_chunk_count}/${docStatus.chunk_count} chunks)...`,
+                      "RUNNING"
+                    )
+                  );
+                }
+              }
+              if (!isDocReady) {
+                throw new Error(`Document ingestion timed out for '${f.name}'.`);
+              }
+            } else {
+              updateLiveEvents(
+                createClientEvent(
+                  "DOC_READY",
+                  `'${f.name}' already ingested (deduplicated by SHA-256).`,
+                  "COMPLETED"
+                )
+              );
+            }
+          }
+        }
+
+        const runId =
+          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `run-${Date.now()}`;
+        currentActiveRunId.current = runId;
+
+        const allDocIds = Array.from(new Set([...selectedDocIds, ...attachedDocIds]));
+
+        const initialEv = createClientEvent("RUN_STARTED", "Pipeline execution started", "RUNNING");
+        currentArch = updateArchitectureFromEvent(currentArch, initialEv);
+        updateLiveEvents(initialEv);
+        setLiveTasks(liveState.tasks);
+        setArchState(currentArch);
+
+        const sseSource = new ServerExecutionEventSource(runId);
+        unsubscribe = sseSource.subscribe(
+          (ev) => {
+            if (!mounted.current || id !== requestId.current) return;
+
+            liveState = processExecutionEvent(liveState, ev);
+            currentArch = updateArchitectureFromEvent(currentArch, ev);
+
+            setEvents([...liveState.events]);
+            setLiveTasks([...liveState.tasks]);
+            setArchState({ ...currentArch });
+
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === assistantMsgId ? { ...msg, events: [...liveState.events] } : msg
+              )
+            );
+          },
+          () => {}
+        );
+
         const raw = await executePipeline(
           promptText,
           runId,
@@ -339,7 +361,7 @@ export function ControlPlane() {
         if (mounted.current && id === requestId.current) setRunning(false);
       }
     },
-    [task, running, messages, recent.refetch]
+    [task, running, messages, selectedDocIds, recent.refetch]
   );
 
   useEffect(() => {
