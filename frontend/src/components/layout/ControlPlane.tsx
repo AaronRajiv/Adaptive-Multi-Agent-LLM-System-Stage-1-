@@ -4,6 +4,7 @@ import { Sidebar } from "@/components/sidebar/Sidebar";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { LiveArchitectureCanvas } from "@/components/architecture/LiveArchitectureCanvas";
 import { TelemetryConsole, type TelemetryTab } from "@/components/telemetry/TelemetryConsole";
+import { DocumentManagerModal } from "@/components/documents/DocumentManagerModal";
 
 import { adaptRun } from "@/services/adapters";
 import {
@@ -12,6 +13,7 @@ import {
   fetchSystemStatus,
   uploadDocument,
   fetchDocumentStatus,
+  cancelRun,
 } from "@/services/api";
 import { ServerExecutionEventSource } from "@/services/executionEvents";
 import { processExecutionEvent, type LiveExecutionState } from "@/services/executionState";
@@ -47,6 +49,26 @@ export function ControlPlane() {
   const [selectedTask, setSelectedTask] = useState<ExecutionTask>();
   const [selectedNodeId, setSelectedNodeId] = useState<ArchitectureNodeId>();
   const [telemetryTab, setTelemetryTab] = useState<TelemetryTab>("events");
+
+  // Document Manager & Ingestion states
+  const [docManagerOpen, setDocManagerOpen] = useState(false);
+  const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
+  const currentActiveRunId = useRef<string>("");
+
+  const handleCancel = async () => {
+    if (currentActiveRunId.current && running) {
+      try {
+        await cancelRun(currentActiveRunId.current);
+        setRunning(false);
+        setEvents((prev) => [
+          ...prev,
+          createClientEvent("RUN_CANCELLED", "Execution cancelled by user request", "FAILED"),
+        ]);
+      } catch (e) {
+        console.error("Cancel failed:", e);
+      }
+    }
+  };
 
   // QoL States: Collapsible Sidebar & Resizable Right Panel
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -217,6 +239,9 @@ export function ControlPlane() {
         typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
           ? crypto.randomUUID()
           : `run-${Date.now()}`;
+      currentActiveRunId.current = runId;
+
+      const allDocIds = Array.from(new Set([...selectedDocIds, ...attachedDocIds]));
 
       let liveState: LiveExecutionState = {
         running: true,
@@ -260,7 +285,7 @@ export function ControlPlane() {
           runId,
           undefined,
           historyPayload,
-          attachedDocIds.length > 0 ? attachedDocIds : undefined
+          allDocIds.length > 0 ? allDocIds : undefined
         );
         if (!mounted.current || id !== requestId.current) return;
 
@@ -379,6 +404,7 @@ export function ControlPlane() {
         onSelectRecentRun={handleSelectRecentRun}
         onRefreshRecent={() => recent.refetch()}
         onClear={clear}
+        onOpenDocumentManager={() => setDocManagerOpen(true)}
       />
 
       {/* 2. Center Chat Panel */}
@@ -391,6 +417,8 @@ export function ControlPlane() {
           running={running}
           onClear={clear}
           presets={PRESETS}
+          onCancel={handleCancel}
+          onOpenEvidence={() => setTelemetryTab("evidence")}
         />
       </div>
 
@@ -442,6 +470,18 @@ export function ControlPlane() {
           />
         </div>
       </div>
+
+      {/* 4. Document Manager Modal */}
+      <DocumentManagerModal
+        open={docManagerOpen}
+        onClose={() => setDocManagerOpen(false)}
+        selectedDocIds={selectedDocIds}
+        onToggleSelectDoc={(docId) =>
+          setSelectedDocIds((prev) =>
+            prev.includes(docId) ? prev.filter((id) => id !== docId) : [...prev, docId]
+          )
+        }
+      />
     </div>
   );
 }

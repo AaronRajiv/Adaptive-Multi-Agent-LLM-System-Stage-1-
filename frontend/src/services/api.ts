@@ -112,6 +112,18 @@ export async function deleteDocument(documentId: string): Promise<void> {
   await request(`/api/documents/${documentId}`, { method: "DELETE" }, 8000);
 }
 
+export async function cancelRun(runId: string): Promise<{ run_id: string; status: string; message: string }> {
+  return (await request(`/api/runs/${runId}/cancel`, { method: "POST" }, 8000)) as {
+    run_id: string;
+    status: string;
+    message: string;
+  };
+}
+
+export async function fetchRunMetrics(runId: string): Promise<any> {
+  return await request(`/api/runs/${runId}/metrics`, undefined, 8000);
+}
+
 export async function fetchRun(runId: string): Promise<any> {
   return await request(`/api/runs/${runId}`, undefined, 8000);
 }

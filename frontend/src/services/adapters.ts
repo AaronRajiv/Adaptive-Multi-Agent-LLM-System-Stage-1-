@@ -15,11 +15,17 @@ function chunksFrom(v: unknown): ProvenanceChunk[] {
   return array(v).map((item) => {
     const c = record(item);
     return {
+      id: text(c["id"]) || undefined,
       documentId: text(c["document_id"]) || undefined,
       chunkIndex: numeric(c["chunk_index"]),
       source: text(c["source"]) || undefined,
       content: text(c["content"]) || undefined,
       similarity: numeric(c["similarity_score"] ?? c["score"]),
+      pageStart: numeric(c["page_start"]),
+      pageEnd: numeric(c["page_end"]),
+      articlePath: text(c["article_path"]) || undefined,
+      heading: text(c["heading"]) || undefined,
+      retrievalMethod: text(c["retrieval_method"]) || undefined,
     };
   });
 }
@@ -132,6 +138,52 @@ export function adaptRun(value: unknown): ExecutionModel {
     finalAnswer: text(r["final_answer"]),
     createdAt: text(r["created_at"]),
     executionStrategy: text(r["execution_strategy"]) || "MULTI_AGENT",
+    replanningCount: numeric(r["replanning_count"]) ?? 0,
+    metrics: r["metrics"]
+      ? {
+          runId: text(record(r["metrics"])["run_id"]),
+          strategy: text(record(r["metrics"])["strategy"]),
+          totalTokens: numeric(record(r["metrics"])["total_tokens"]) ?? 0,
+          totalLlmCalls: numeric(record(r["metrics"])["total_llm_calls"]) ?? 0,
+          totalEstimatedCost: numeric(record(r["metrics"])["total_estimated_cost"]) ?? 0,
+          wallTimeMs: numeric(record(r["metrics"])["wall_time_ms"]) ?? 0,
+          calls: array(record(r["metrics"])["calls"]).map((c) => {
+            const rc = record(c);
+            return {
+              stage: text(rc["stage"]),
+              model: text(rc["model"]),
+              tokensIn: numeric(rc["tokens_in"]) ?? 0,
+              tokensOut: numeric(rc["tokens_out"]) ?? 0,
+              totalTokens: numeric(rc["total_tokens"]) ?? 0,
+              latencyMs: numeric(rc["latency_ms"]) ?? 0,
+              estimatedCost: numeric(rc["estimated_cost"]) ?? 0,
+              success: Boolean(rc["success"] ?? true),
+            };
+          }),
+        }
+      : undefined,
+    verification: r["verification_result"]
+      ? {
+          citationCount: numeric(record(r["verification_result"])["citation_count"]) ?? 0,
+          validCitationCount: numeric(record(r["verification_result"])["valid_citation_count"]) ?? 0,
+          citationValidityPercent: numeric(record(r["verification_result"])["citation_validity_percent"]) ?? 0,
+          validCitations: array(record(r["verification_result"])["valid_citations"]).map(text),
+          invalidCitations: array(record(r["verification_result"])["invalid_citations"]).map(text),
+          passed: Boolean(record(r["verification_result"])["passed"]),
+        }
+      : undefined,
+    evaluation: r["evaluation"]
+      ? {
+          score: numeric(record(r["evaluation"])["score"]) ?? 0,
+          status: (text(record(r["evaluation"])["status"]) || "PASS") as any,
+          feedback: text(record(r["evaluation"])["feedback"]),
+          groundednessScore: numeric(record(r["evaluation"])["groundedness_score"]),
+          coverageScore: numeric(record(r["evaluation"])["coverage_score"]),
+          distinctionScore: numeric(record(r["evaluation"])["distinction_score"]),
+          honestyScore: numeric(record(r["evaluation"])["honesty_score"]),
+          uncoveredDomains: array(record(r["evaluation"])["uncovered_domains"]).map(text),
+        }
+      : undefined,
     dependenciesAvailable:
       rawTasks.some((v) => {
         const t = record(v);

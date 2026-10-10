@@ -1,6 +1,7 @@
 import {
   ArrowRight,
   ChevronRight,
+  Database,
   History,
   Network,
   PanelLeftClose,
@@ -24,6 +25,7 @@ interface Props {
   onSelectRecentRun: (runId: string) => void;
   onRefreshRecent: () => void;
   onClear: () => void;
+  onOpenDocumentManager?: () => void;
 }
 
 export function Sidebar({
@@ -37,6 +39,7 @@ export function Sidebar({
   onSelectRecentRun,
   onRefreshRecent,
   onClear,
+  onOpenDocumentManager,
 }: Props) {
   return (
     <aside
@@ -86,27 +89,53 @@ export function Sidebar({
       <div className="flex-1 overflow-y-auto p-2 space-y-4">
         {/* New Run Button */}
         {!collapsed ? (
-          <Button
-            variant="outline"
-            size="sm"
-            className="w-full justify-start gap-2 bg-neutral-900 border-white/10 hover:border-white/20 text-neutral-200 text-xs"
-            disabled={running}
-            onClick={onClear}
-          >
-            <Plus size={14} className="text-emerald-400" />
-            New Execution Run
-          </Button>
+          <div className="space-y-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full justify-start gap-2 bg-neutral-900 border-white/10 hover:border-white/20 text-neutral-200 text-xs"
+              disabled={running}
+              onClick={onClear}
+            >
+              <Plus size={14} className="text-emerald-400" />
+              New Execution Run
+            </Button>
+            {onOpenDocumentManager && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="w-full justify-start gap-2 text-neutral-300 hover:text-white hover:bg-white/5 text-xs"
+                onClick={onOpenDocumentManager}
+              >
+                <Database size={13} className="text-cyan-400" />
+                Document Store
+              </Button>
+            )}
+          </div>
         ) : (
-          <Button
-            size="icon"
-            variant="outline"
-            className="w-9 h-9 mx-auto flex items-center justify-center bg-neutral-900 border-white/10 hover:border-white/20 text-neutral-200"
-            disabled={running}
-            onClick={onClear}
-            title="New Execution Run"
-          >
-            <Plus size={15} className="text-emerald-400" />
-          </Button>
+          <div className="flex flex-col gap-1.5 items-center">
+            <Button
+              size="icon"
+              variant="outline"
+              className="w-9 h-9 mx-auto flex items-center justify-center bg-neutral-900 border-white/10 hover:border-white/20 text-neutral-200"
+              disabled={running}
+              onClick={onClear}
+              title="New Execution Run"
+            >
+              <Plus size={15} className="text-emerald-400" />
+            </Button>
+            {onOpenDocumentManager && (
+              <Button
+                size="icon"
+                variant="ghost"
+                className="w-9 h-9 mx-auto flex items-center justify-center text-neutral-400 hover:text-white hover:bg-white/5"
+                onClick={onOpenDocumentManager}
+                title="Document Knowledge Base"
+              >
+                <Database size={14} className="text-cyan-400" />
+              </Button>
+            )}
+          </div>
         )}
 
         {/* Presets List */}

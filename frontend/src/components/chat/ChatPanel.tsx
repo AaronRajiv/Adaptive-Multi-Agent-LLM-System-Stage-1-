@@ -28,6 +28,8 @@ interface Props {
   running: boolean;
   onClear: () => void;
   presets: { label: string; task: string }[];
+  onCancel?: () => void;
+  onOpenEvidence?: () => void;
 }
 
 export function ChatPanel({
@@ -37,6 +39,8 @@ export function ChatPanel({
   onSubmit,
   running,
   presets,
+  onCancel,
+  onOpenEvidence,
 }: Props) {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
@@ -159,34 +163,63 @@ export function ChatPanel({
                 {/* Markdown Response */}
                 {msg.content && (
                   <div className="bg-neutral-950 border border-white/10 rounded-xl p-4 text-xs text-neutral-200 space-y-3 relative shadow-md">
-                    <div className="flex items-center justify-between pb-2 border-b border-white/10 text-[10px] text-neutral-400 font-mono">
-                      <span>
-                        {msg.executionStrategy === "DIRECT"
-                          ? "DIRECT RESPONSE"
-                          : msg.executionStrategy === "SINGLE_AGENT"
-                            ? "RESPONSE"
-                            : "FINAL SYNTHESIS ANSWER"}
-                      </span>
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        className="h-6 w-6 text-neutral-400 hover:text-white"
-                        onClick={async () => {
-                          try {
-                            await navigator.clipboard.writeText(msg.content);
-                            setCopiedId(msg.id);
-                            setTimeout(() => setCopiedId(null), 2000);
-                          } catch {
-                            setCopiedId(null);
-                          }
-                        }}
-                      >
-                        {copiedId === msg.id ? (
-                          <Check size={12} className="text-emerald-400" />
-                        ) : (
-                          <Copy size={12} />
+                    <div className="flex items-center justify-between pb-2.5 border-b border-white/10 text-[10px] font-mono">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`px-2 py-0.5 rounded font-bold ${
+                            msg.executionStrategy === "DIRECT"
+                              ? "bg-blue-950 text-blue-300 border border-blue-500/40"
+                              : msg.executionStrategy === "SINGLE_AGENT"
+                              ? "bg-cyan-950 text-cyan-300 border border-cyan-500/40"
+                              : msg.executionStrategy === "SINGLE_AGENT_RAG"
+                              ? "bg-emerald-950 text-emerald-300 border border-emerald-500/40"
+                              : "bg-purple-950 text-purple-300 border border-purple-500/40"
+                          }`}
+                        >
+                          {msg.executionStrategy || "MULTI_AGENT"}
+                        </span>
+                        <span className="text-neutral-400">
+                          {msg.executionStrategy === "DIRECT"
+                            ? "DIRECT RESPONSE"
+                            : msg.executionStrategy === "SINGLE_AGENT"
+                            ? "SINGLE AGENT"
+                            : msg.executionStrategy === "SINGLE_AGENT_RAG"
+                            ? "RAG GROUNDED"
+                            : "MULTI-AGENT SYNTHESIS"}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        {onOpenEvidence && (
+                          <button
+                            type="button"
+                            onClick={onOpenEvidence}
+                            className="text-[10px] text-emerald-400 hover:text-emerald-300 underline font-mono cursor-pointer"
+                          >
+                            Inspect Evidence
+                          </button>
                         )}
-                      </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-6 w-6 text-neutral-400 hover:text-white"
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(msg.content);
+                              setCopiedId(msg.id);
+                              setTimeout(() => setCopiedId(null), 2000);
+                            } catch {
+                              setCopiedId(null);
+                            }
+                          }}
+                        >
+                          {copiedId === msg.id ? (
+                            <Check size={12} className="text-emerald-400" />
+                          ) : (
+                            <Copy size={12} />
+                          )}
+                        </Button>
+                      </div>
                     </div>
                     <TypewriterMarkdown content={msg.content} speedMs={10} />
                   </div>
@@ -253,6 +286,18 @@ export function ChatPanel({
             disabled={running}
             onChange={(e) => setTask(e.target.value)}
           />
+
+          {running && onCancel && (
+            <button
+              type="button"
+              onClick={onCancel}
+              className="px-2.5 py-1 rounded-full bg-red-950/80 hover:bg-red-900 border border-red-500/40 text-red-300 text-[11px] font-medium transition-colors flex items-center gap-1 flex-shrink-0"
+              title="Cancel ongoing execution"
+            >
+              <X size={12} />
+              <span>Cancel</span>
+            </button>
+          )}
 
           <button
             type="submit"
