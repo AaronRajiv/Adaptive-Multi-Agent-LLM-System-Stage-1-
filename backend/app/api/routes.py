@@ -36,6 +36,7 @@ from app.models.schemas import (
     RunResponse,
     SystemStatusResponse,
 )
+from app.orchestration.resource_budget import ResourceBudgetExceededError
 from app.pipeline.baseline_pipeline import get_recent_runs
 from app.pipeline.orchestrated_pipeline import OrchestratedPipeline
 
@@ -288,6 +289,14 @@ async def _run_async_worker(
                     data={"error": f"Execution timed out after {settings.run_timeout_seconds}s"},
                 )
             )
+    except ResourceBudgetExceededError as rbe:
+        logger.error("Resource budget exceeded in async worker for run_id=%s: %s", run_id, str(rbe))
+        RUNS_INDEX[run_id] = {
+            "run_id": run_id,
+            "status": "failed",
+            "result": None,
+            "error": f"Resource budget exceeded: {str(rbe)}",
+        }
     except Exception as exc:
         logger.error(
             "Async pipeline execution failed for run_id=%s: %s",
@@ -480,6 +489,24 @@ async def run_pipeline(request: RunRequest):
             detail={
                 "error_type": "ProviderError",
                 "message": f"Downstream LLM provider error: {str(e)}",
+            },
+        )
+    except ResourceBudgetExceededError as e:
+        logger.error("Resource budget exceeded for run_id=%s: %s", run_id, str(e))
+        RUNS_INDEX[run_id] = {
+            "run_id": run_id,
+            "status": "failed",
+            "result": None,
+            "error": str(e),
+        }
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error_type": "ResourceBudgetExceededError",
+                "message": f"Execution resource budget exceeded: {str(e)}",
+                "limit_type": getattr(e, "limit_type", "unknown"),
+                "current_value": getattr(e, "current_value", None),
+                "limit_value": getattr(e, "limit_value", None),
             },
         )
     except Exception as e:

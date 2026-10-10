@@ -76,8 +76,8 @@ class Settings(BaseSettings):
     budget_single_agent_rag_max_tokens: int = Field(default=18000, ge=1, description="Max tokens for SINGLE_AGENT_RAG strategy")
     budget_single_agent_rag_max_wall_time_seconds: float = Field(default=60.0, ge=0.001, description="Max wall time in seconds for SINGLE_AGENT_RAG strategy")
 
-    budget_multi_agent_max_llm_calls: int = Field(default=20, ge=1, description="Max LLM calls for MULTI_AGENT strategy")
-    budget_multi_agent_max_tokens: int = Field(default=80000, ge=1000, description="Max tokens for MULTI_AGENT strategy")
+    budget_multi_agent_max_llm_calls: int = Field(default=35, ge=1, description="Max LLM calls for MULTI_AGENT strategy")
+    budget_multi_agent_max_tokens: int = Field(default=120000, ge=1000, description="Max tokens for MULTI_AGENT strategy")
     budget_multi_agent_max_wall_time_seconds: float = Field(default=240.0, ge=1.0, description="Max wall time in seconds for MULTI_AGENT strategy")
 
     # Reliability and Persistence configuration
