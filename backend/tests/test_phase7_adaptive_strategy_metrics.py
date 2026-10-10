@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.config import Settings
+from app.config import Settings, settings
 from app.events import ExecutionEvent, ExecutionEventType, RunEventBus
 from app.llm.base import LLMProvider
 from app.llm.provider import MockLLMProvider
@@ -281,8 +281,9 @@ async def test_pipeline_execution_populates_run_response_metrics():
 # ==============================================================================
 
 @pytest.mark.asyncio
-async def test_get_run_metrics_api_endpoint():
+async def test_get_run_metrics_api_endpoint(monkeypatch):
     """GET /api/runs/{run_id}/metrics returns aggregated metrics and call records."""
+    monkeypatch.setattr(settings, "llm_provider", "mock")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # Run pipeline via API
