@@ -14,6 +14,7 @@ import {
   uploadDocument,
   fetchDocumentStatus,
   cancelRun,
+  fetchRun,
 } from "@/services/api";
 import { ServerExecutionEventSource } from "@/services/executionEvents";
 import { processExecutionEvent, type LiveExecutionState } from "@/services/executionState";
@@ -144,8 +145,8 @@ export function ControlPlane() {
   });
 
   const submit = useCallback(
-    async (files?: File[]) => {
-      const promptText = task.trim();
+    async (files?: File[], overridePrompt?: string) => {
+      const promptText = (overridePrompt ?? task).trim();
       if (running || !promptText) return;
       const id = ++requestId.current;
 
@@ -159,6 +160,13 @@ export function ControlPlane() {
       const historyPayload: ChatMessagePayload[] = messages
         .filter((m) => Boolean(m.content))
         .map((m) => ({ role: m.role, content: m.content }));
+
+      // Generate runId early so SSE and child components have it immediately
+      const runId =
+        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `run-${Date.now()}`;
+      currentActiveRunId.current = runId;
 
       // Append user prompt message & assistant placeholder message
       const userMsgId = `user-${Date.now()}`;
@@ -178,6 +186,7 @@ export function ControlPlane() {
         content: "",
         events: [initialClientEv],
         running: true,
+        runId,
       };
 
       setMessages((prev) => [...prev, userMsg, assistantMsg]);
@@ -267,12 +276,6 @@ export function ControlPlane() {
           }
         }
 
-        const runId =
-          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-            ? crypto.randomUUID()
-            : `run-${Date.now()}`;
-        currentActiveRunId.current = runId;
-
         const allDocIds = Array.from(new Set([...selectedDocIds, ...attachedDocIds]));
 
         const initialEv = createClientEvent("RUN_STARTED", "Pipeline execution started", "RUNNING");
@@ -334,7 +337,15 @@ export function ControlPlane() {
         setMessages((prev) =>
           prev.map((msg) =>
             msg.id === assistantMsgId
-              ? { ...msg, content: model.finalAnswer, running: false, executionStrategy: model.executionStrategy }
+              ? {
+                  ...msg,
+                  content: model.finalAnswer,
+                  running: false,
+                  executionStrategy: model.executionStrategy,
+                  runId: model.runId,
+                  validCitations: model.verification?.validCitations,
+                  statusMessage: undefined,
+                }
               : msg
           )
         );
@@ -342,20 +353,83 @@ export function ControlPlane() {
         recent.refetch();
       } catch (err) {
         if (!mounted.current || id !== requestId.current) return;
-        const message = err instanceof Error ? err.message : "Execution failed";
-        setError(message);
-
-        const failEv = createClientEvent("RUN_FAILED", message, "FAILED");
-        currentArch = updateArchitectureFromEvent(currentArch, failEv);
-        setArchState({ ...currentArch });
-
-        setEvents((current) => [...current, createClientEvent("REQUEST_FAILED", message, "FAILED")]);
-
+        // Honest recovery: transition to "lost connection, checking run status" and poll run status
         setMessages((prev) =>
           prev.map((msg) =>
-            msg.id === assistantMsgId ? { ...msg, error: message, running: false } : msg
+            msg.id === assistantMsgId
+              ? { ...msg, statusMessage: "lost connection, checking run status...", running: true }
+              : msg
           )
         );
+
+        let recovered = false;
+        try {
+          // Poll GET /api/runs/{runId} to inspect backend state honestly
+          for (let poll = 0; poll < 60; poll++) {
+            await new Promise((r) => setTimeout(r, 1500));
+            if (!mounted.current || id !== requestId.current) return;
+            const check = await fetchRun(runId).catch(() => null);
+            if (check) {
+              if (check.status === "completed" && check.result) {
+                const model = adaptRun(check.result);
+                setRun(model);
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantMsgId
+                      ? {
+                          ...msg,
+                          content: model.finalAnswer,
+                          running: false,
+                          statusMessage: undefined,
+                          runId: model.runId,
+                          validCitations: model.verification?.validCitations,
+                          executionStrategy: model.executionStrategy,
+                        }
+                      : msg
+                  )
+                );
+                recovered = true;
+                break;
+              } else if (check.status === "failed") {
+                const failMsg = check.error || "Backend pipeline execution failed.";
+                setError(failMsg);
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantMsgId
+                      ? { ...msg, error: failMsg, running: false, statusMessage: undefined }
+                      : msg
+                  )
+                );
+                recovered = true;
+                break;
+              } else if (check.status === "cancelled") {
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantMsgId
+                      ? { ...msg, error: "Execution cancelled.", running: false, statusMessage: undefined }
+                      : msg
+                  )
+                );
+                recovered = true;
+                break;
+              }
+            }
+          }
+        } catch {
+          // Ignore polling errors
+        }
+
+        if (!recovered) {
+          const message = "Lost connection to server. Run status unknown; verify network or backend.";
+          setError(message);
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantMsgId
+                ? { ...msg, error: message, running: false, statusMessage: undefined }
+                : msg
+            )
+          );
+        }
       } finally {
         unsubscribe();
         if (mounted.current && id === requestId.current) setRunning(false);
@@ -435,7 +509,7 @@ export function ControlPlane() {
           messages={messages}
           task={task}
           setTask={setTask}
-          onSubmit={(files) => void submit(files)}
+          onSubmit={(files, overridePrompt) => void submit(files, overridePrompt)}
           running={running}
           onClear={clear}
           presets={PRESETS}
@@ -470,8 +544,12 @@ export function ControlPlane() {
               setSelectedNodeId(nodeId);
               if (nodeId === "task_graph" || nodeId === "agents") {
                 setTelemetryTab("graph");
-              } else if (nodeId === "rag") {
-                setTelemetryTab("rag");
+              } else if (nodeId === "rag" || nodeId === "tools") {
+                setTelemetryTab("evidence");
+              } else if (nodeId === "planner" || nodeId === "api_gateway" || nodeId === "user_task") {
+                setTelemetryTab("strategy");
+              } else if (nodeId === "evaluation") {
+                setTelemetryTab("replanning");
               } else {
                 setTelemetryTab("node");
               }

@@ -163,6 +163,8 @@ class Orchestrator:
                     dependency_results=dependency_results,
                     retrieved_context=retrieved_context,
                     evidence_ledger=self.evidence_ledger,
+                    event_bus=self.event_bus,
+                    run_id=input_context.get("run_id"),
                 )
                 result = await agent.execute(execution_context)
                 if result.task_id != task.id:
@@ -213,10 +215,12 @@ class Orchestrator:
             input_context.get("document_ids") if input_context else None
         )
 
-        display_query = str(query) if query else " | ".join(str(q) for q in queries)
+        queries_list = [str(q) for q in queries] if queries and isinstance(queries, list) else ([str(query)] if query else [])
+        display_query = " | ".join(queries_list) if queries_list else str(task.description or "")
         await self._emit_task_event(
             ExecutionEventType.RAG_STARTED, task,
-            message=f"Retrieving context for task '{task.id}': {display_query}",
+            message=f"Retrieving context for task '{task.id}': {display_query[:150]}",
+            metadata={"queries": queries_list},
         )
 
         if queries and isinstance(queries, list):
@@ -228,9 +232,26 @@ class Orchestrator:
                 str(query), top_k=top_k, document_ids=document_ids
             )
 
+        rag_articles = sorted(list({
+            c.metadata.get("article_path") or c.metadata.get("article")
+            for c in result.chunks if getattr(c, "metadata", None)
+        } - {None, ""}))
+        rag_pages = sorted(list(set([
+            c.metadata["page_start"]
+            for c in result.chunks
+            if getattr(c, "metadata", None) and isinstance(c.metadata.get("page_start"), int)
+        ])))
+
         await self._emit_task_event(
             ExecutionEventType.RAG_COMPLETED, task,
             message=f"Retrieved {len(result.chunks)} chunk(s) for task '{task.id}'.",
+            metadata={
+                "queries": queries_list,
+                "n_chunks": len(result.chunks),
+                "articles": rag_articles,
+                "pages": rag_pages,
+                "document_ids": list({c.document_id for c in result.chunks if c.document_id}),
+            },
         )
         return result
 
@@ -312,6 +333,7 @@ class Orchestrator:
         task: TaskNode,
         capability: str | None = None,
         message: str | None = None,
+        metadata: dict | None = None,
     ) -> None:
         """Emit a task-level event if an event bus is attached."""
         if self.event_bus is None:
@@ -324,5 +346,6 @@ class Orchestrator:
                 capability=capability or task.assigned_capability or task.type.value,
                 status=task.status.value,
                 message=message,
+                metadata=metadata,
             )
         )

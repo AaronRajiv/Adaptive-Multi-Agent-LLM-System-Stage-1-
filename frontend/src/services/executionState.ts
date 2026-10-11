@@ -142,6 +142,7 @@ export function processExecutionEvent(
       }
       break;
 
+    case "RAG_STARTED":
     case "RAG_RETRIEVAL_STARTED": {
       let ragNode = nextTasks.find((t) => t.id === "rag" || t.type === "rag");
       if (!ragNode) {
@@ -162,6 +163,7 @@ export function processExecutionEvent(
       break;
     }
 
+    case "RAG_COMPLETED":
     case "RAG_RETRIEVAL_COMPLETED": {
       const chunks = Array.isArray(payload["chunks"])
         ? (payload["chunks"] as Record<string, unknown>[])
@@ -181,7 +183,7 @@ export function processExecutionEvent(
         }));
         nextChunks = [...nextChunks, ...formattedChunks];
       }
-      const qVal = payload["query"];
+      const qVal = payload["query"] || (event.metadata?.["queries"] ? (event.metadata["queries"] as string[]).join(", ") : undefined);
       nextTasks = nextTasks.map((t) =>
         t.id === "rag" || t.type === "rag"
           ? {
@@ -191,6 +193,115 @@ export function processExecutionEvent(
               query: typeof qVal === "string" ? qVal : t.query,
             }
           : t
+      );
+      break;
+    }
+
+    case "WEB_SEARCH_STARTED": {
+      const q = String(event.metadata?.["query"] || payload["query"] || "");
+      let sNode = nextTasks.find((t) => t.id === "web-search");
+      if (!sNode) {
+        nextTasks.push({
+          id: "web-search",
+          title: q ? `Search: ${q.slice(0, 40)}` : "Web Search",
+          description: `Tavily web search: "${q}"`,
+          type: "web",
+          capability: "web_search",
+          status: "RUNNING" as TaskStatus,
+          dependencies: [],
+          query: q,
+        });
+      } else {
+        nextTasks = nextTasks.map((t) =>
+          t.id === "web-search" ? { ...t, status: "RUNNING" as TaskStatus, query: q } : t
+        );
+      }
+      break;
+    }
+
+    case "WEB_SEARCH_COMPLETED": {
+      const urls = (event.metadata?.["urls"] || payload["urls"] || []) as unknown[];
+      const count = Array.isArray(urls) ? urls.length : 1;
+      nextTasks = nextTasks.map((t) =>
+        t.id === "web-search"
+          ? {
+              ...t,
+              status: "COMPLETED" as TaskStatus,
+              output: `Found ${count} search result URLs`,
+            }
+          : t
+      );
+      break;
+    }
+
+    case "WEB_FETCH_STARTED": {
+      const dom = String(event.metadata?.["domain"] || payload["domain"] || "web");
+      const taskId = `web-fetch-${dom}`;
+      let fNode = nextTasks.find((t) => t.id === taskId);
+      if (!fNode) {
+        nextTasks.push({
+          id: taskId,
+          title: `Fetch: ${dom}`,
+          description: `Reading page content from ${event.metadata?.["url"] || dom}`,
+          type: "web",
+          capability: "web_fetch",
+          status: "RUNNING" as TaskStatus,
+          dependencies: ["web-search"],
+        });
+      } else {
+        nextTasks = nextTasks.map((t) => (t.id === taskId ? { ...t, status: "RUNNING" as TaskStatus } : t));
+      }
+      break;
+    }
+
+    case "WEB_FETCH_COMPLETED": {
+      const dom = String(event.metadata?.["domain"] || payload["domain"] || "web");
+      const taskId = `web-fetch-${dom}`;
+      const title = String(event.metadata?.["title"] || payload["title"] || dom);
+      const url = String(event.metadata?.["url"] || payload["url"] || "");
+      const hash = String(event.metadata?.["content_hash"] || payload["content_hash"] || dom.slice(0, 8));
+      const latency = typeof event.metadata?.["latency_ms"] === "number" ? event.metadata["latency_ms"] : undefined;
+
+      nextTasks = nextTasks.map((t) =>
+        t.id === taskId
+          ? {
+              ...t,
+              status: "COMPLETED" as TaskStatus,
+              output: `Read ${title}`,
+              durationMs: latency,
+            }
+          : t
+      );
+
+      if (!nextChunks.some((c) => c.source === url || c.id === hash)) {
+        nextChunks.push({
+          id: hash,
+          documentId: dom,
+          source: url,
+          heading: title,
+          content: title,
+          retrievalMethod: "web_fetch",
+        });
+      }
+      break;
+    }
+
+    case "WEB_FETCH_BLOCKED": {
+      const dom = String(event.metadata?.["domain"] || payload["domain"] || "web");
+      const taskId = `web-fetch-${dom}`;
+      const reason = String(event.metadata?.["reason"] || payload["reason"] || "Blocked");
+      nextTasks = nextTasks.map((t) =>
+        t.id === taskId ? { ...t, status: "BLOCKED" as TaskStatus, output: reason } : t
+      );
+      break;
+    }
+
+    case "WEB_FETCH_FAILED": {
+      const dom = String(event.metadata?.["domain"] || payload["domain"] || "web");
+      const taskId = `web-fetch-${dom}`;
+      const reason = String(event.metadata?.["reason"] || payload["reason"] || "Failed");
+      nextTasks = nextTasks.map((t) =>
+        t.id === taskId ? { ...t, status: "FAILED" as TaskStatus, output: reason } : t
       );
       break;
     }

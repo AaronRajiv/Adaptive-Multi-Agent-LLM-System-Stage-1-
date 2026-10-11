@@ -10,5 +10,8 @@ pytest-asyncio>=0.23.0
 pypdf>=4.0.0
 pdfminer.six>=20231228
 python-multipart>=0.0.9
+# Web content extraction dependencies
+trafilatura>=2.0.0
+beautifulsoup4>=4.12.0
 # Optional persistent Stage 5 knowledge repository (not required by deterministic tests)
 psycopg[binary]>=3.1.0

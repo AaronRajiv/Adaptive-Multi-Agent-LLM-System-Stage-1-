@@ -39,11 +39,11 @@ Evaluation Rubric (100 total points):
 Scoring Rules:
 1. Provide an overall integer score between 0 and 100 (sum of sub-scores).
 2. If overall score >= {threshold}, status MUST be "PASS". Otherwise status MUST be "FAIL".
-3. Provide component sub-scores:
-   - groundedness_score (0-25)
-   - coverage_score (0-25)
-   - distinction_score (0-25)
-   - honesty_score (0-25)
+3. Provide component sub-scores (CRITICAL: each must strictly be an integer between 0 and 25, NOT 0-100, do NOT use percentages; 25 represents perfect score for each category):
+   - groundedness_score (0-25 pts max)
+   - coverage_score (0-25 pts max)
+   - distinction_score (0-25 pts max)
+   - honesty_score (0-25 pts max)
 4. List any weak or uncovered domains in 'uncovered_domains'.
 5. Provide constructive feedback detailing specific gaps to guide targeted replanning.
 6. Return your evaluation strictly in the required JSON schema.
@@ -106,6 +106,16 @@ class EvaluatorAgent:
                 f"- Total chunks: {summary['total_chunks']}\n"
                 f"- Indexed articles: {summary['indexed_articles']}\n"
             )
+            chunk_snippets = []
+            for item in list(evidence_ledger.items.values())[:15]:
+                chunk_snippets.append(
+                    f"[{item.citation}] (Doc: {item.document_id}, Source: {item.document_label or item.document_id})\n{item.text}"
+                )
+            prompt_parts.append(
+                "Evidence Ledger Source Chunks (Ground Truth Evidence):\n"
+                + "\n\n".join(chunk_snippets)
+                + "\n"
+            )
 
         prompt_parts.append(
             f"Pass Threshold: {self.pass_threshold} / 100\n\n"
@@ -125,10 +135,30 @@ class EvaluatorAgent:
             if verification_result:
                 result.verification_result = verification_result.model_dump()
 
-            # Enforce pass threshold status consistency
-            calculated_status = "PASS" if (result.score or 0) >= self.pass_threshold else "FAIL"
-            if result.status != calculated_status:
-                result.status = calculated_status
+            # 1. Compute total score in code as sum of validated subscores (ignore model-reported total)
+            subscores = [
+                result.groundedness_score,
+                result.coverage_score,
+                result.distinction_score,
+                result.honesty_score,
+            ]
+            if any(s is not None for s in subscores):
+                result.score = sum(s or 0 for s in subscores)
+
+            # 2. Groundedness Gate: fail if groundedness < 15/25 or verifier citation_validity < threshold
+            groundedness_gated = (result.groundedness_score is not None and result.groundedness_score < 15)
+            verifier_gated = bool(verification_result and verification_result.citation_validity < float(self.pass_threshold))
+
+            if groundedness_gated or verifier_gated:
+                result.status = "FAIL"
+                gate_reasons = []
+                if groundedness_gated:
+                    gate_reasons.append(f"Groundedness score ({result.groundedness_score}/25) failed minimum gate threshold (15/25)")
+                if verifier_gated:
+                    gate_reasons.append(f"Citation validity ({verification_result.citation_validity}%) below threshold ({self.pass_threshold}%)")
+                result.feedback += f" [GATE FAILED: {'; '.join(gate_reasons)}]"
+            else:
+                result.status = "PASS" if (result.score or 0) >= self.pass_threshold else "FAIL"
 
             return result
         except Exception as e:

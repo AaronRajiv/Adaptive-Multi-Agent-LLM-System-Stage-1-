@@ -56,3 +56,10 @@ frontend_backup_*/
 frontend.zip
 *.zip
 scratch/
+
+# Runtime data & logs
+backend/data/web_cache/
+backend/data/tavily_credits.json
+backend/test_logs/
+data/
+*.log

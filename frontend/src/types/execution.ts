@@ -114,4 +114,7 @@ export interface ChatMessage {
   running?: boolean | undefined;
   executionStrategy?: string | undefined;
   metrics?: RunMetricsData | undefined;
+  runId?: string | undefined;
+  statusMessage?: string | undefined;
+  validCitations?: string[] | undefined;
 }

@@ -163,4 +163,73 @@ describe("Live Architecture Visualization & Data-Flow Mapping", () => {
     expect(state.nodes.find((n) => n.id === "agents")?.status).toBe("FAILED");
     expect(state.nodes.find((n) => n.id === "orchestrator")?.status).toBe("FAILED");
   });
+
+  it("11. WEB_SEARCH_STARTED and COMPLETED activate tools node with cyan particle and search details", () => {
+    let state = createInitialArchitectureState();
+    state = updateArchitectureFromEvent(
+      state,
+      makeEvent("WEB_SEARCH_STARTED", undefined, { query: "formula 1 2026 regulations" })
+    );
+
+    const toolsNode = state.nodes.find((n) => n.id === "tools");
+    expect(toolsNode?.status).toBe("ACTIVE");
+    expect(toolsNode?.detail).toContain("Search: formula 1 2026");
+    expect(state.toolsUsed).toBe(true);
+
+    const searchParticle = state.particles.find(
+      (p) => p.source === "orchestrator" && p.target === "tools" && p.color === "#06b6d4"
+    );
+    expect(searchParticle).toBeDefined();
+
+    state = updateArchitectureFromEvent(
+      state,
+      makeEvent("WEB_SEARCH_COMPLETED", undefined, { query: "formula 1 2026 regulations", result_count: 5 })
+    );
+    expect(state.nodes.find((n) => n.id === "tools")?.status).toBe("ACTIVE");
+    expect(state.nodes.find((n) => n.id === "tools")?.detail).toContain("5 result");
+  });
+
+  it("12. WEB_FETCH_STARTED and COMPLETED activate tools node with green particle and reading domain", () => {
+    let state = createInitialArchitectureState();
+    state = updateArchitectureFromEvent(
+      state,
+      makeEvent("WEB_FETCH_STARTED", undefined, { domain: "fia.com", url: "https://fia.com/regs" })
+    );
+
+    const toolsNode = state.nodes.find((n) => n.id === "tools");
+    expect(toolsNode?.status).toBe("ACTIVE");
+    expect(toolsNode?.detail).toContain("Reading fia.com");
+
+    const fetchParticle = state.particles.find(
+      (p) => p.source === "orchestrator" && p.target === "tools" && p.color === "#10b981"
+    );
+    expect(fetchParticle).toBeDefined();
+
+    state = updateArchitectureFromEvent(
+      state,
+      makeEvent("WEB_FETCH_COMPLETED", undefined, { domain: "fia.com", chars: 4200 })
+    );
+    expect(state.nodes.find((n) => n.id === "tools")?.detail).toContain("Read fia.com");
+  });
+
+  it("13. STRATEGY_DECIDED with needs_web lights up tools node and routes particle", () => {
+    let state = createInitialArchitectureState();
+    state = updateArchitectureFromEvent(
+      state,
+      makeEvent("STRATEGY_DECIDED", undefined, {
+        strategy: "SINGLE_AGENT",
+        needs_web: true,
+        rationale: "Requires current external information",
+      })
+    );
+
+    expect(state.toolsUsed).toBe(true);
+    const toolsNode = state.nodes.find((n) => n.id === "tools");
+    expect(toolsNode?.status).toBe("READY");
+
+    const stratParticle = state.particles.find(
+      (p) => p.source === "planner" && p.target === "tools"
+    );
+    expect(stratParticle).toBeDefined();
+  });
 });

@@ -7,6 +7,8 @@ Executes user requests using task-appropriate strategies:
 3. MULTI_AGENT: Dynamic task-graph decomposition, parallel execution, RAG grounding, evaluator critique, targeted replanning, and synthesis.
 """
 
+import hashlib
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -46,6 +48,10 @@ from app.orchestration.resource_budget import BudgetTracker, ResourceBudgetExcee
 from app.pipeline.baseline_pipeline import record_run
 from app.telemetry.instrumented_provider import InstrumentedLLMProvider
 from app.telemetry.metrics import global_metrics_collector
+from app.tools.fetch_page import FetchPageInput, FetchPageTool
+from app.tools.search_provider import CreditTracker
+from app.tools.web_cache import WebCacheManager
+from app.tools.web_search import WebSearchInput, WebSearchTool
 
 logger = get_logger("app.pipeline.orchestrated_pipeline")
 
@@ -97,9 +103,28 @@ class OrchestratedPipeline:
                 logger.warning("Failed to initialize default RetrievalService: %s", exc)
                 self.retrieval_service = None
 
+        # Web Tools & Cache Setup
+        self.credit_tracker = CreditTracker()
+        self.cache_manager = WebCacheManager(custom_settings=self.settings)
+        self.web_search_tool = WebSearchTool(
+            custom_settings=self.settings,
+            credit_tracker=self.credit_tracker,
+            cache_manager=self.cache_manager,
+        )
+        self.fetch_page_tool = FetchPageTool(
+            custom_settings=self.settings,
+            cache_manager=self.cache_manager,
+        )
+
         # Capability Registry Setup
         self.registry = CapabilityRegistry()
-        self.registry.register("research", ResearchTaskAgent(self.researcher))
+        research_task_agent = ResearchTaskAgent(
+            self.researcher,
+            web_search_tool=self.web_search_tool,
+            fetch_page_tool=self.fetch_page_tool,
+        )
+        self.registry.register("research", research_task_agent)
+        self.registry.register("web_research", research_task_agent)
         self.registry.register("analysis", AnalysisTaskAgent(self.analyst))
 
     async def execute(
@@ -280,6 +305,8 @@ class OrchestratedPipeline:
         budget = get_budget_for_strategy(decision.strategy, self.settings)
         budget_tracker = BudgetTracker(budget)
         instrumented_llm.budget_tracker = budget_tracker
+        self.web_search_tool.budget_tracker = budget_tracker.web_tracker
+        self.fetch_page_tool.budget_tracker = budget_tracker.web_tracker
         decision.budget = budget.model_dump()
 
         strategy_meta = {
@@ -290,7 +317,13 @@ class OrchestratedPipeline:
             "domains": decision.domains,
             "cross_document_reasoning": decision.cross_document_reasoning,
             "budget": decision.budget,
+            "needs_web": decision.needs_web,
+            "web_rationale": decision.web_rationale,
         }
+        logger.info(
+            "Strategy decided for run_id=%s: strategy=%s, needs_web=%s, reasoning=%s, web_rationale=%s",
+            run_id, decision.strategy.value, decision.needs_web, decision.reasoning, decision.web_rationale,
+        )
         await self._emit(
             ExecutionEventType.STRATEGY_DECIDED,
             message=f"Strategy decided: {decision.strategy.value} ({decision.reasoning})",
@@ -394,19 +427,145 @@ class OrchestratedPipeline:
                     logger.error(err_msg)
                     await self._emit(ExecutionEventType.RUN_FAILED, message=err_msg)
                     raise RuntimeError(err_msg)
-                await self._emit(ExecutionEventType.RAG_STARTED, message="Retrieving knowledge context...")
+                await self._emit(ExecutionEventType.RAG_STARTED, message="Retrieving knowledge context...", metadata={"queries": [user_task[:150]]})
                 try:
                     ctx = await self.retrieval_service.retrieve(user_task, top_k=3, document_ids=document_ids)
                     retrieved_chunks_collected = ctx.chunks
                     if ctx.chunks:
                         snippets = [f"[{c.source}]: {c.content}" for c in ctx.chunks]
                         retrieval_context_prompt = "\n\nRetrieved Knowledge Base Context:\n" + "\n\n".join(snippets) + "\n\n"
-                    await self._emit(ExecutionEventType.RAG_COMPLETED, message=f"Retrieved {len(ctx.chunks)} chunks.")
+                    rag_articles = sorted(list({
+                        c.metadata.get("article_path") or c.metadata.get("article")
+                        for c in ctx.chunks if getattr(c, "metadata", None)
+                    } - {None, ""}))
+                    rag_pages = sorted(list(set([
+                        c.metadata["page_start"]
+                        for c in ctx.chunks
+                        if getattr(c, "metadata", None) and isinstance(c.metadata.get("page_start"), int)
+                    ])))
+                    await self._emit(
+                        ExecutionEventType.RAG_COMPLETED,
+                        message=f"Retrieved {len(ctx.chunks)} chunks.",
+                        metadata={
+                            "queries": [user_task[:150]],
+                            "n_chunks": len(ctx.chunks),
+                            "articles": rag_articles,
+                            "pages": rag_pages,
+                            "document_ids": list({c.document_id for c in ctx.chunks if c.document_id}),
+                        }
+                    )
                 except Exception as exc:
                     err_msg = f"Knowledge retrieval failed: {str(exc)}"
                     logger.error(err_msg, exc_info=True)
                     await self._emit(ExecutionEventType.RUN_FAILED, message=err_msg)
                     raise RuntimeError(err_msg) from exc
+
+            evidence_ledger = EvidenceLedger()
+            web_sources_list: List[Dict[str, Any]] = []
+            if decision.needs_web and self.web_search_tool:
+                instrumented_llm.set_stage("WebSearch")
+                search_q = user_task.strip()
+                await self._emit(
+                    ExecutionEventType.WEB_SEARCH_STARTED,
+                    message=f"Searching the web for: \"{search_q[:150]}\"",
+                    metadata={"query": search_q[:150], "provider": "tavily"}
+                )
+                try:
+                    search_res = await self.web_search_tool.execute(WebSearchInput(query=search_q, max_results=4))
+                    if search_res.success and search_res.output:
+                        results = search_res.output.get("results", [])
+                        urls = [r.get("url") for r in results if r.get("url")]
+                        await self._emit(
+                            ExecutionEventType.WEB_SEARCH_COMPLETED,
+                            message=f"Found {len(results)} web results for \"{search_q[:150]}\"",
+                            metadata={"query": search_q[:150], "urls": urls, "results": results}
+                        )
+                        import urllib.parse
+                        for hit in results[:3]:
+                            hit_url = hit.get("url")
+                            hit_title = hit.get("title", "")
+                            hit_snippet = hit.get("snippet", "")
+                            if hit_url and self.fetch_page_tool:
+                                hit_domain = urllib.parse.urlparse(hit_url).netloc.replace("www.", "")
+                                t_fstart = time.perf_counter()
+                                await self._emit(
+                                    ExecutionEventType.WEB_FETCH_STARTED,
+                                    message=f"Viewing website: {hit_title or hit_domain}",
+                                    metadata={"url": hit_url, "domain": hit_domain, "title": hit_title[:150]}
+                                )
+                                fetch_res = await self.fetch_page_tool.execute(FetchPageInput(url=hit_url))
+                                f_dur_ms = round((time.perf_counter() - t_fstart) * 1000, 2)
+                                if fetch_res.success and fetch_res.output:
+                                    out = fetch_res.output
+                                    final_u = out.get("final_url", hit_url)
+                                    final_d = urllib.parse.urlparse(final_u).netloc.replace("www.", "")
+                                    evidence_ledger.add_web_page(
+                                        url=final_u,
+                                        title=out.get("title", hit_title),
+                                        text=out.get("text", ""),
+                                        retrieval_timestamp=out.get("retrieval_timestamp", ""),
+                                        content_hash=out.get("content_hash", ""),
+                                        raw_response=fetch_res.metadata,
+                                    )
+                                    await self._emit(
+                                        ExecutionEventType.WEB_FETCH_COMPLETED,
+                                        message=f"Read {out.get('title') or hit_domain}",
+                                        metadata={
+                                            "url": final_u,
+                                            "domain": final_d,
+                                            "title": (out.get("title") or hit_title)[:150],
+                                            "status": "completed",
+                                            "bytes": out.get("bytes_downloaded") or fetch_res.metadata.get("bytes", 0),
+                                            "latency_ms": f_dur_ms,
+                                            "content_hash": (out.get("content_hash") or "")[:8],
+                                        }
+                                    )
+                                    web_sources_list.append({
+                                        "id": (out.get("content_hash") or "")[:8],
+                                        "title": out.get("title", hit_title),
+                                        "url": final_u,
+                                        "domain": final_d,
+                                        "status": "completed",
+                                        "citation": f"[web:{(out.get('content_hash') or '')[:8]}]",
+                                        "snippet": out.get("text", "")[:250],
+                                    })
+                                else:
+                                    err_s = str(fetch_res.error or "Fetch failed")
+                                    is_bl = (
+                                        (fetch_res.metadata and fetch_res.metadata.get("violation_type") == "security")
+                                        or "robots.txt" in err_s.lower()
+                                        or "disallowed" in err_s.lower()
+                                        or "security" in err_s.lower()
+                                    )
+                                    ev_tp = ExecutionEventType.WEB_FETCH_BLOCKED if is_bl else ExecutionEventType.WEB_FETCH_FAILED
+                                    st_nm = "blocked" if is_bl else "failed"
+                                    await self._emit(
+                                        ev_tp,
+                                        message=f"{'Blocked from' if is_bl else 'Failed to read'} {hit_domain}: {err_s[:120]}",
+                                        metadata={
+                                            "url": hit_url,
+                                            "domain": hit_domain,
+                                            "title": hit_title[:150],
+                                            "status": st_nm,
+                                            "reason": err_s[:200],
+                                            "latency_ms": f_dur_ms,
+                                        }
+                                    )
+                                    web_sources_list.append({
+                                        "id": hashlib.sha256(hit_url.encode()).hexdigest()[:8],
+                                        "title": hit_title,
+                                        "url": hit_url,
+                                        "domain": hit_domain,
+                                        "status": st_nm,
+                                        "reason": err_s[:200],
+                                        "citation": f"[web:{hashlib.sha256(hit_url.encode()).hexdigest()[:8]}]",
+                                        "snippet": hit_snippet[:250],
+                                    })
+                        formatted_web = evidence_ledger.format_for_prompt(max_chunks=6)
+                        if formatted_web:
+                            retrieval_context_prompt += "\n\nRetrieved Web Evidence:\n" + formatted_web + "\n\n"
+                except Exception as exc:
+                    logger.warning("Single-agent web search execution failed: %s", exc)
 
             instrumented_llm.set_stage("Synthesis")
             await self._emit(ExecutionEventType.SYNTHESIS_STARTED, message="Generating single-agent response.")
@@ -415,10 +574,14 @@ class OrchestratedPipeline:
                 turns = [f"{msg.role.capitalize()}: {msg.content}" for msg in history[-5:]]
                 history_text = "Prior Conversation History:\n" + "\n".join(turns) + "\n\n"
 
+            sys_prompt = (
+                "You are a helpful, expert AI assistant. Deliver an accurate, well-structured response directly matching the user's intent. "
+                "If web evidence is provided, cite sources with their [web:<hash>] tags."
+            )
             single_prompt = f"{history_text}{retrieval_context_prompt}User Task:\n\"{user_task.strip()}\"\n\nPlease provide a clear, accurate, direct response."
             single_answer = await instrumented_llm.generate(
                 prompt=single_prompt,
-                system_prompt="You are a helpful, expert AI assistant. Deliver an accurate, well-structured response directly matching the user's intent."
+                system_prompt=sys_prompt
             )
             dur = round((time.perf_counter() - t0) * 1000, 2)
             await self._emit(ExecutionEventType.SYNTHESIS_COMPLETED, message="Single-agent response completed.")
@@ -457,6 +620,7 @@ class OrchestratedPipeline:
                 created_at=created_at,
                 task_graph=single_graph,
                 retrieved_chunks=retrieved_chunks_collected,
+                evidence_ledger=evidence_ledger.model_dump() if evidence_ledger.items else None,
                 task_execution_traces=[],
                 metrics=run_metrics.model_dump(),
             )
@@ -523,7 +687,13 @@ class OrchestratedPipeline:
         instrumented_llm.set_stage("Research")
         t_orch = time.perf_counter()
         exec_result = await orchestrator.execute(
-            graph, input_context={"user_task": user_task, "document_ids": document_ids}
+            graph,
+            input_context={
+                "user_task": user_task,
+                "document_ids": document_ids,
+                "needs_web": decision.needs_web,
+                "run_id": run_id,
+            },
         )
         orch_dur = round((time.perf_counter() - t_orch) * 1000, 2)
 
@@ -736,6 +906,92 @@ class OrchestratedPipeline:
                             except Exception as exc:
                                 logger.warning("Targeted retrieval during replanning failed for '%s': %s", q, exc)
 
+                # Emit targeted web queries for missing evidence gaps (ONLY if web is enabled for run: decision.needs_web)
+                has_missing_evidence = bool(r.missing_evidence)
+                needs_web_expansion = decision.needs_web and (has_missing_evidence or (verifier_result and not verifier_result.passed))
+                if self.web_search_tool and needs_web_expansion:
+                    gap_query = r.missing_evidence or f"{user_task} {r.subtask_description}"
+                    clean_gap_query = re.sub(r"[^\w\s\-\.]", " ", str(gap_query)).strip()
+                    words = clean_gap_query.split()
+                    if len(words) > 12:
+                        clean_gap_query = " ".join(words[:12])
+                    if clean_gap_query:
+                        try:
+                            search_res = await self.web_search_tool.execute(
+                                WebSearchInput(query=clean_gap_query, max_results=3)
+                            )
+                            if search_res.success and search_res.output:
+                                results = search_res.output.get("results", [])
+                                existing_urls = {
+                                    item.url for item in evidence_ledger.items.values() if item.source_type == "web" and item.url
+                                }
+                                new_hits = [h for h in results if h.get("url") and h["url"] not in existing_urls]
+                                if new_hits and self.fetch_page_tool:
+                                    import urllib.parse
+                                    for hit in new_hits[:2]:
+                                        h_u = hit["url"]
+                                        h_t = hit.get("title", "")
+                                        h_dom = urllib.parse.urlparse(h_u).netloc.replace("www.", "")
+                                        t_fstart = time.perf_counter()
+                                        await self._emit(
+                                            ExecutionEventType.WEB_FETCH_STARTED,
+                                            message=f"Viewing website: {h_t or h_dom}",
+                                            metadata={"url": h_u, "domain": h_dom, "title": h_t[:150]},
+                                        )
+                                        fetch_res = await self.fetch_page_tool.execute(FetchPageInput(url=h_u))
+                                        f_dur_ms = round((time.perf_counter() - t_fstart) * 1000, 2)
+                                        if fetch_res.success and fetch_res.output:
+                                            out = fetch_res.output
+                                            evidence_ledger.add_web_page(
+                                                url=out.get("final_url", h_u),
+                                                title=out.get("title", h_t),
+                                                text=out.get("text", ""),
+                                                retrieval_timestamp=out.get("retrieval_timestamp", ""),
+                                                content_hash=out.get("content_hash", ""),
+                                                raw_response=fetch_res.metadata,
+                                            )
+                                            await self._emit(
+                                                ExecutionEventType.WEB_FETCH_COMPLETED,
+                                                message=f"Read {out.get('title') or h_dom}",
+                                                metadata={
+                                                    "url": out.get("final_url", h_u),
+                                                    "domain": h_dom,
+                                                    "title": (out.get("title") or h_t)[:150],
+                                                    "status": "completed",
+                                                    "bytes": out.get("bytes_downloaded") or fetch_res.metadata.get("bytes", 0),
+                                                    "latency_ms": f_dur_ms,
+                                                    "content_hash": (out.get("content_hash") or "")[:8],
+                                                },
+                                            )
+                                        else:
+                                            err_s = str(fetch_res.error or "Fetch failed")
+                                            is_bl = (
+                                                (fetch_res.metadata and fetch_res.metadata.get("violation_type") == "security")
+                                                or "robots.txt" in err_s.lower()
+                                                or "disallowed" in err_s.lower()
+                                                or "security" in err_s.lower()
+                                            )
+                                            ev_tp = ExecutionEventType.WEB_FETCH_BLOCKED if is_bl else ExecutionEventType.WEB_FETCH_FAILED
+                                            st_nm = "blocked" if is_bl else "failed"
+                                            await self._emit(
+                                                ev_tp,
+                                                message=f"{'Blocked from' if is_bl else 'Failed to read'} {h_dom}: {err_s[:120]}",
+                                                metadata={
+                                                    "url": h_u,
+                                                    "domain": h_dom,
+                                                    "title": h_t[:150],
+                                                    "status": st_nm,
+                                                    "reason": err_s[:200],
+                                                    "latency_ms": f_dur_ms,
+                                                },
+                                            )
+                                elif not new_hits:
+                                    logger.info("Replanner targeted web query '%s' yielded no new sources.", clean_gap_query)
+                            elif search_res.error and "budget exceeded" in search_res.error.lower():
+                                logger.warning("Replanner web search budget exhausted: %s", search_res.error)
+                        except Exception as exc:
+                            logger.warning("Replanner targeted web search failed for '%s': %s", clean_gap_query, exc)
+
                 revised_prompt = (
                     f"{r.subtask_description}\n\n"
                     f"Evaluator Critique to Address:\n{evaluation_output.feedback}"
@@ -749,6 +1005,7 @@ class OrchestratedPipeline:
                     user_task=user_task,
                     subtask=revised_subtask,
                     retrieved_context=rc,
+                    evidence_ledger=evidence_ledger,
                 )
                 r.findings = re_research.findings
                 if re_research.citations:
@@ -817,6 +1074,10 @@ class OrchestratedPipeline:
             if evaluation_output.status == "PASS" and (not verifier_result or verifier_result.passed):
                 break
 
+        if getattr(evaluation_output, "score_normalized", False):
+            run_m = global_metrics_collector.get_or_create(run_id, strategy="MULTI_AGENT")
+            run_m.score_normalizations_count += 1
+
         total_wall_ms = round((time.perf_counter() - t_run_start) * 1000, 2)
         run_metrics = global_metrics_collector.finalize_run(run_id, wall_time_ms=total_wall_ms, strategy="MULTI_AGENT")
 
@@ -879,6 +1140,9 @@ class OrchestratedPipeline:
         event_type: ExecutionEventType,
         message: str | None = None,
         metadata: dict | None = None,
+        task_id: str | None = None,
+        capability: str | None = None,
+        status: str | None = None,
     ) -> None:
         """Emit a pipeline-level event if an event bus is attached."""
         if self.event_bus is None:
@@ -887,6 +1151,9 @@ class OrchestratedPipeline:
             ExecutionEvent(
                 run_id=self.event_bus.run_id,
                 event_type=event_type,
+                task_id=task_id,
+                capability=capability,
+                status=status,
                 message=message,
                 metadata=metadata,
             )

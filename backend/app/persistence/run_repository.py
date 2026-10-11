@@ -52,6 +52,7 @@ class RunRepository(ABC):
         pass
 
     @abstractmethod
+    @abstractmethod
     async def list_metrics(self, limit: int = 50) -> List[RunMetrics]:
         """Retrieve recent telemetry metrics."""
         pass
@@ -59,6 +60,16 @@ class RunRepository(ABC):
     @abstractmethod
     async def delete_run(self, run_id: str) -> bool:
         """Delete a run and associated metrics."""
+        pass
+
+    @abstractmethod
+    async def save_events(self, run_id: str, events: List[Any]) -> None:
+        """Persist execution events for a run."""
+        pass
+
+    @abstractmethod
+    async def get_events(self, run_id: str, after_seq: Optional[int] = None) -> List[Any]:
+        """Retrieve persisted execution events for a run, optionally after a sequence number."""
         pass
 
 
@@ -69,6 +80,7 @@ class InMemoryRunRepository(RunRepository):
         self._max_runs = max_runs
         self._runs: OrderedDict[str, RunResponse] = OrderedDict()
         self._metrics: OrderedDict[str, RunMetrics] = OrderedDict()
+        self._events: OrderedDict[str, List[Any]] = OrderedDict()
         self._lock = asyncio.Lock()
 
     async def save_run(self, run: RunResponse) -> None:
@@ -105,9 +117,25 @@ class InMemoryRunRepository(RunRepository):
             items = list(reversed(self._metrics.values()))
             return items[:limit]
 
+    async def save_events(self, run_id: str, events: List[Any]) -> None:
+        async with self._lock:
+            self._events[run_id] = list(events)
+            if len(self._events) > self._max_runs:
+                self._events.popitem(last=False)
+
+    async def get_events(self, run_id: str, after_seq: Optional[int] = None) -> List[Any]:
+        async with self._lock:
+            events = self._events.get(run_id, [])
+            if after_seq is None:
+                return list(events)
+            return [e for e in events if getattr(e, "seq", None) is not None and getattr(e, "seq", 0) > after_seq]
+
     async def delete_run(self, run_id: str) -> bool:
         async with self._lock:
+            self._metrics.pop(run_id, None)
+            self._events.pop(run_id, None)
             removed = self._runs.pop(run_id, None) is not None
+            return removed
             self._metrics.pop(run_id, None)
             return removed
 
@@ -303,6 +331,19 @@ class PostgresRunRepository(RunRepository):
                 await cur.execute("DELETE FROM run_metrics WHERE run_id = %s;", (run_id,))
                 await cur.execute("DELETE FROM runs WHERE run_id = %s;", (run_id,))
                 return cur.rowcount > 0
+
+    async def save_events(self, run_id: str, events: List[Any]) -> None:
+        if not hasattr(self, "_events_cache"):
+            self._events_cache: Dict[str, List[Any]] = {}
+        self._events_cache[run_id] = list(events)
+
+    async def get_events(self, run_id: str, after_seq: Optional[int] = None) -> List[Any]:
+        if not hasattr(self, "_events_cache"):
+            self._events_cache = {}
+        events = self._events_cache.get(run_id, [])
+        if after_seq is None:
+            return list(events)
+        return [e for e in events if getattr(e, "seq", None) is not None and getattr(e, "seq", 0) > after_seq]
 
 
 _global_run_repository: Optional[RunRepository] = None

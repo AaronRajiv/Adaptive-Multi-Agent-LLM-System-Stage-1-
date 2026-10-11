@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     budget_direct_max_wall_time_seconds: float = Field(default=15.0, ge=0.001, description="Max wall time in seconds for DIRECT strategy")
 
     budget_single_agent_max_llm_calls: int = Field(default=3, ge=1, description="Max LLM calls for SINGLE_AGENT strategy")
-    budget_single_agent_max_tokens: int = Field(default=12000, ge=1, description="Max tokens for SINGLE_AGENT strategy")
+    budget_single_agent_max_tokens: int = Field(default=35000, ge=1, description="Max tokens for SINGLE_AGENT strategy")
     budget_single_agent_max_wall_time_seconds: float = Field(default=45.0, ge=0.001, description="Max wall time in seconds for SINGLE_AGENT strategy")
 
     budget_single_agent_rag_max_llm_calls: int = Field(default=4, ge=1, description="Max LLM calls for SINGLE_AGENT_RAG strategy")
@@ -79,17 +79,41 @@ class Settings(BaseSettings):
     budget_multi_agent_max_llm_calls: int = Field(default=35, ge=1, description="Max LLM calls for MULTI_AGENT strategy")
     budget_multi_agent_max_tokens: int = Field(default=120000, ge=1000, description="Max tokens for MULTI_AGENT strategy")
     budget_multi_agent_max_wall_time_seconds: float = Field(default=240.0, ge=1.0, description="Max wall time in seconds for MULTI_AGENT strategy")
+    enable_multi_domain_rag_promotion: bool = Field(default=False, description="Whether to promote multi-article or multi-domain document RAG queries to MULTI_AGENT")
 
     # Reliability and Persistence configuration
     max_concurrent_runs: int = Field(default=5, ge=1, le=50, description="Maximum concurrent pipeline execution runs allowed")
     run_timeout_seconds: float = Field(default=180.0, ge=1.0, description="Global execution timeout in seconds per pipeline run")
     database_url: str = Field(default="", description="Optional PostgreSQL connection URL for runs and metrics persistence")
 
+    # Web search and page fetch configuration
+    tavily_api_key: str = Field(default="", description="API key for Tavily search provider")
+    web_search_provider: str = Field(default="tavily", description="Web search provider (tavily, mock)")
+    web_max_results_default: int = Field(default=5, ge=1, le=20, description="Default max search results")
+    fetch_page_max_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, description="Max allowed bytes per fetched page (2MB)")
+    fetch_page_timeout_seconds: float = Field(default=10.0, ge=1.0, description="Timeout in seconds for page fetching")
+    fetch_page_max_redirects: int = Field(default=5, ge=0, le=10, description="Max allowed redirects")
+    fetch_page_user_agent: str = Field(default="AdaptiveAgentBot/1.0 (+http://localhost:8000; web-research)", description="User-Agent header for fetching")
+    fetch_page_domain_allowlist: str = Field(default="", description="Comma-separated allowed domains, or empty for all public domains")
+    fetch_page_domain_denylist: str = Field(default="", description="Comma-separated disallowed domains")
+    fetch_page_respect_robots_txt: bool = Field(default=True, description="Whether to check and enforce robots.txt")
+    web_cache_mode: str = Field(default="live", description="Caching mode: 'live', 'record', or 'replay'")
+    web_cache_dir: str = Field(default="data/web_cache", description="Directory path for cached search and page fixtures")
+    web_cache_ttl_seconds: float = Field(default=86400.0, ge=0.0, description="Cache entry time-to-live in seconds (0 = never expire)")
+
     # Server / Network configuration
     cors_origins: str = Field(
         default="http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173",
         description="Comma-separated list of allowed CORS origins"
     )
+
+    @property
+    def fetch_page_domain_allowlist_set(self) -> set[str]:
+        return {d.strip().lower() for d in self.fetch_page_domain_allowlist.split(",") if d.strip()}
+
+    @property
+    def fetch_page_domain_denylist_set(self) -> set[str]:
+        return {d.strip().lower() for d in self.fetch_page_domain_denylist.split(",") if d.strip()}
 
     @property
     def cors_origins_list(self) -> List[str]:

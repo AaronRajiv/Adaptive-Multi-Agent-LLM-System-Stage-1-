@@ -20,8 +20,11 @@ Computes:
 
 import asyncio
 import csv
+import hashlib
 import io
+import math
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
@@ -139,13 +142,15 @@ def create_experiment_retrieval_service() -> RetrievalService:
                 id=chunk.document_id, source=chunk.source, content=chunk.content
             )
 
-        # Generate deterministic normalized vector matching MockEmbeddingProvider style
-        tokens = [w for w in chunk.content.lower().split() if w]
+        tokens = re.findall(r"[a-z0-9]+", chunk.content.lower())
         vec = [0.0] * 64
-        for idx, tok in enumerate(tokens):
-            vec[(hash(tok) + idx) % 64] += 1.0
-        norm = sum(v * v for v in vec) ** 0.5 or 1.0
-        norm_vec = [v / norm for v in vec]
+        for token in tokens:
+            digest = hashlib.sha256(token.encode("utf-8")).digest()
+            idx = int.from_bytes(digest[:4], "big") % 64
+            sign = 1.0 if digest[4] % 2 == 0 else -1.0
+            vec[idx] += sign
+        mag = math.sqrt(sum(v * v for v in vec))
+        norm_vec = [v / mag for v in vec] if mag else vec
 
         repo.chunks[chunk.id] = StoredKnowledgeChunk(
             id=chunk.id,

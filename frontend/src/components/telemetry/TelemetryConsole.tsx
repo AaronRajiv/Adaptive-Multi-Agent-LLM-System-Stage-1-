@@ -10,9 +10,11 @@ import {
   Compass,
   Database,
   DollarSign,
+  ExternalLink,
   FileSearch,
   FileText,
   GitBranch,
+  Globe,
   Layers,
   RefreshCw,
   ShieldAlert,
@@ -31,7 +33,7 @@ interface Props {
   activeTab: TelemetryTab;
   setActiveTab: (tab: TelemetryTab) => void;
   running: boolean;
-  tasks: ExecutionTask[];
+  tasks?: ExecutionTask[];
   onSelectCitation?: (chunk: ProvenanceChunk) => void;
 }
 
@@ -42,7 +44,7 @@ export function TelemetryConsole({
   activeTab,
   setActiveTab,
   running,
-  tasks,
+  tasks = [],
   onSelectCitation,
 }: Props) {
   const [selectedChunk, setSelectedChunk] = useState<ProvenanceChunk | null>(null);
@@ -55,11 +57,46 @@ export function TelemetryConsole({
     }
   }, [events.length]);
 
-  const strategy = run?.executionStrategy || "MULTI_AGENT";
+  // Derive strategy & web usage from run or live events
+  const strategyEvent = events.find(
+    (e) => e.rawType === "STRATEGY_SELECTED" || e.rawType === "STRATEGY_DECIDED" || e.label === "STRATEGY_SELECTED"
+  );
+  const strategyMeta = (strategyEvent?.metadata || strategyEvent?.payload || {}) as Record<string, unknown>;
+  const strategy = run?.executionStrategy || (strategyMeta["strategy"] as string | undefined) || "MULTI_AGENT";
+  const needsWeb = Boolean(strategyMeta["needs_web"] || events.some((e) => e.rawType?.startsWith("WEB_")));
+  const webRationale = (strategyMeta["rationale"] || strategyMeta["web_rationale"]) as string | undefined;
+
   const metrics = run?.metrics;
   const verification = run?.verification;
   const evaluation = run?.evaluation;
-  const chunks = run?.chunks || [];
+
+  // Extract live web chunks from events if run.chunks is empty or in progress
+  const liveWebChunks: ProvenanceChunk[] = events
+    .filter((e) => e.rawType === "WEB_FETCH_COMPLETED")
+    .map((e) => {
+      const meta = (e.metadata || e.payload || {}) as Record<string, unknown>;
+      const hash = String(meta["content_hash"] || meta["domain"] || e.id);
+      return {
+        id: hash,
+        documentId: String(meta["domain"] || "web"),
+        source: String(meta["url"] || ""),
+        heading: String(meta["title"] || meta["domain"] || "Web Source"),
+        content: String(meta["title"] ? `${meta["title"]} (${meta["url"]})` : meta["url"] || ""),
+        retrievalMethod: "web_fetch",
+      };
+    });
+
+  const runChunks = run?.chunks || [];
+  // Merge runChunks and liveWebChunks without duplicates
+  const seenIds = new Set<string>();
+  const chunks: ProvenanceChunk[] = [];
+  for (const c of [...runChunks, ...liveWebChunks]) {
+    const key = c.id || c.source || "";
+    if (!key || !seenIds.has(key)) {
+      if (key) seenIds.add(key);
+      chunks.push(c);
+    }
+  }
 
   return (
     <div className="flex flex-col h-full bg-neutral-950 border border-white/10 rounded-xl overflow-hidden text-neutral-200">
@@ -240,6 +277,23 @@ export function TelemetryConsole({
                   : "Complex multi-domain analytical challenge decomposed into a bounded DAG of parallel specialist agents."}
               </p>
 
+              {needsWeb && (
+                <div className="p-3 rounded-xl bg-cyan-950/40 border border-cyan-500/30 flex items-start gap-2.5 text-xs text-cyan-200">
+                  <Globe size={15} className="text-cyan-400 mt-0.5 flex-shrink-0" />
+                  <div className="space-y-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-cyan-300">Live Web Research Enabled</span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-mono">
+                        TAVILY SEARCH
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-neutral-300 leading-relaxed">
+                      {webRationale || "Autonomous web search, safety verification, and source page fetching active for this run."}
+                    </p>
+                  </div>
+                </div>
+              )}
+
               <div className="grid grid-cols-3 gap-2 pt-2 border-t border-white/5 font-mono text-[10px]">
                 <div className="p-2 rounded bg-black/40 border border-white/5 space-y-1">
                   <span className="text-neutral-500">MAX LLM CALLS</span>
@@ -313,6 +367,7 @@ export function TelemetryConsole({
             {chunks.length > 0 ? (
               chunks.map((chunk, idx) => {
                 const isSelected = selectedChunk?.id === chunk.id || selectedChunk?.chunkIndex === chunk.chunkIndex;
+                const isWeb = chunk.retrievalMethod === "web_fetch" || (chunk.source && /^https?:\/\//i.test(chunk.source));
                 return (
                   <div
                     key={chunk.id || idx}
@@ -338,6 +393,22 @@ export function TelemetryConsole({
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2 text-[9.5px] font-mono text-neutral-400">
+                      {isWeb && (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-cyan-950/80 border border-cyan-500/30 text-cyan-300">
+                          <Globe size={10} /> Web Evidence
+                        </span>
+                      )}
+                      {chunk.source && /^https?:\/\//i.test(chunk.source) && (
+                        <a
+                          href={chunk.source}
+                          target="_blank"
+                          rel="noopener noreferrer nofollow"
+                          className="inline-flex items-center gap-0.5 text-cyan-400 hover:text-cyan-300 hover:underline"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {chunk.documentId || "link"} <ExternalLink size={9} />
+                        </a>
+                      )}
                       {chunk.articlePath && (
                         <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-cyan-300">
                           Article {chunk.articlePath}
@@ -353,7 +424,7 @@ export function TelemetryConsole({
                           p.{chunk.pageStart}{chunk.pageEnd && chunk.pageEnd !== chunk.pageStart ? `-${chunk.pageEnd}` : ""}
                         </span>
                       )}
-                      {chunk.retrievalMethod && (
+                      {chunk.retrievalMethod && chunk.retrievalMethod !== "web_fetch" && (
                         <span className="text-neutral-500">
                           method: {chunk.retrievalMethod}
                         </span>
@@ -368,7 +439,7 @@ export function TelemetryConsole({
               })
             ) : (
               <div className="text-center py-8 text-neutral-500 italic">
-                No RAG evidence chunks retrieved for this run.
+                No RAG evidence chunks or web sources retrieved for this run.
               </div>
             )}
           </div>

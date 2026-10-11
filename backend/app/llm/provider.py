@@ -255,8 +255,8 @@ class GeminiProvider(LLMProvider):
                 "parts": [{"text": system_prompt}]
             }
 
-        max_retries = 3
-        backoff = 2.0
+        max_retries = 5
+        backoff = 2.5
 
         for attempt in range(max_retries):
             try:
@@ -272,15 +272,17 @@ class GeminiProvider(LLMProvider):
 
                 if response.status_code in (429, 503):
                     if attempt < max_retries - 1:
+                        retry_after = response.headers.get("retry-after")
+                        delay = float(retry_after) if retry_after and retry_after.isdigit() else backoff
                         logger.warning(
-                            "Gemini API rate-limit or transient unavailable (HTTP %s). Backing off for %.1fs (attempt %d/%d).",
+                            "Gemini API rate-limit or high demand (HTTP %s). Backing off for %.1fs (attempt %d/%d).",
                             response.status_code,
-                            backoff,
+                            delay,
                             attempt + 1,
                             max_retries,
                         )
-                        await asyncio.sleep(backoff)
-                        backoff *= 2
+                        await asyncio.sleep(delay)
+                        backoff = min(backoff * 2.0, 30.0)
                         continue
 
                 if response.status_code != 200:
@@ -356,8 +358,8 @@ class GeminiProvider(LLMProvider):
                 "parts": [{"text": system_prompt}]
             }
 
-        max_retries = 3
-        backoff = 2.0
+        max_retries = 5
+        backoff = 2.5
         raw_text = ""
 
         for attempt in range(max_retries):
@@ -384,8 +386,17 @@ class GeminiProvider(LLMProvider):
 
                 if response.status_code in (429, 503):
                     if attempt < max_retries - 1:
-                        await asyncio.sleep(backoff)
-                        backoff *= 2
+                        retry_after = response.headers.get("retry-after")
+                        delay = float(retry_after) if retry_after and retry_after.isdigit() else backoff
+                        logger.warning(
+                            "Gemini API rate-limit or high demand (HTTP %s). Backing off for %.1fs (attempt %d/%d).",
+                            response.status_code,
+                            delay,
+                            attempt + 1,
+                            max_retries,
+                        )
+                        await asyncio.sleep(delay)
+                        backoff = min(backoff * 2.0, 30.0)
                         continue
 
                 if response.status_code != 200:

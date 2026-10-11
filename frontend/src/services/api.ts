@@ -124,6 +124,35 @@ export async function fetchRunMetrics(runId: string): Promise<any> {
   return await request(`/api/runs/${runId}/metrics`, undefined, 8000);
 }
 
+export interface EvidencePassage {
+  evidence_id: string;
+  chunk_id?: string;
+  citation?: string;
+  source_type: "document" | "web";
+  document_id?: string;
+  document_label?: string;
+  title?: string;
+  article_path?: string;
+  page_start?: number;
+  page_end?: number;
+  url?: string;
+  text: string;
+  similarity_score?: number;
+  retrieval_timestamp?: string;
+}
+
+export async function fetchEvidencePassage(runId: string, evidenceId: string): Promise<EvidencePassage> {
+  const encoded = encodeURIComponent(evidenceId);
+  return (await request(`/api/runs/${runId}/evidence/${encoded}`, undefined, 8000)) as EvidencePassage;
+}
+
+export async function fetchRunEvents(runId: string, afterSeq?: number): Promise<any[]> {
+  const query = afterSeq !== undefined ? `?after_seq=${afterSeq}&stream=false` : "?stream=false";
+  return (await request(`/api/runs/${runId}/events${query}`, {
+    headers: { Accept: "application/json" },
+  }, 8000)) as any[];
+}
+
 export async function fetchRun(runId: string): Promise<any> {
   return await request(`/api/runs/${runId}`, undefined, 8000);
 }

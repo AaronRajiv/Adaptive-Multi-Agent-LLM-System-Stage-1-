@@ -31,6 +31,8 @@ class TaskExecutionContext(BaseModel):
     dependency_results: Dict[str, TaskExecutionResult] = Field(default_factory=dict)
     retrieved_context: RetrievedContext | None = None
     evidence_ledger: EvidenceLedger | None = None
+    event_bus: Any | None = None
+    run_id: str | None = None
 
 
 class TaskExecutionAgent(ABC):
@@ -63,24 +65,184 @@ class CapabilityRegistry:
             raise KeyError(f"No agent is registered for capability '{capability}'.") from exc
 
 
-class ResearchTaskAgent(TaskExecutionAgent):
-    """Adapter that exposes the existing ResearchAgent as a graph capability with optional RAG."""
+from app.tools.fetch_page import FetchPageInput, FetchPageTool
+from app.tools.web_search import WebSearchInput, WebSearchTool
 
-    def __init__(self, agent: ResearchAgent):
+
+class ResearchTaskAgent(TaskExecutionAgent):
+    """Adapter that exposes the existing ResearchAgent as a graph capability with optional RAG and web research."""
+
+    def __init__(
+        self,
+        agent: ResearchAgent,
+        web_search_tool: Optional[WebSearchTool] = None,
+        fetch_page_tool: Optional[FetchPageTool] = None,
+    ):
         self.agent = agent
+        self.web_search_tool = web_search_tool
+        self.fetch_page_tool = fetch_page_tool
 
     async def execute(self, context: TaskExecutionContext) -> TaskExecutionResult:
         if hasattr(self.agent.llm, "set_stage"):
             self.agent.llm.set_stage(f"Research:{context.task.id}")
         user_task = str(context.input_context.get("user_task", context.task.description))
-        result = await self.agent.execute_subtask(
-            user_task, context.task, retrieved_context=context.retrieved_context
+
+        task_meta = context.task.metadata or {}
+        needs_web = bool(
+            task_meta.get("needs_web")
+            or task_meta.get("web_search_query")
+            or context.input_context.get("needs_web")
+            or context.task.assigned_capability == "web_research"
         )
+
+        web_metadata: Dict[str, Any] = {}
+        if needs_web and self.web_search_tool:
+            search_query = str(task_meta.get("web_search_query") or context.task.description or user_task)
+            active_run_id = context.run_id or context.input_context.get("run_id") or "run-web"
+            if context.event_bus:
+                from app.events import ExecutionEvent, ExecutionEventType
+                await context.event_bus.publish(
+                    ExecutionEvent(
+                        run_id=active_run_id,
+                        event_type=ExecutionEventType.WEB_SEARCH_STARTED,
+                        task_id=context.task.id,
+                        capability="web_search",
+                        message=f"Searching the web for: \"{search_query}\"",
+                        metadata={"query": search_query},
+                    )
+                )
+            try:
+                search_res = await self.web_search_tool.execute(
+                    WebSearchInput(query=search_query, max_results=task_meta.get("web_max_results", 4))
+                )
+                web_metadata["search_result"] = {
+                    "success": search_res.success,
+                    "metadata": search_res.metadata,
+                    "error": search_res.error,
+                }
+                if search_res.success and search_res.output:
+                    results = search_res.output.get("results", [])
+                    if context.event_bus:
+                        from app.events import ExecutionEvent, ExecutionEventType
+                        await context.event_bus.publish(
+                            ExecutionEvent(
+                                run_id=active_run_id,
+                                event_type=ExecutionEventType.WEB_SEARCH_COMPLETED,
+                                task_id=context.task.id,
+                                capability="web_search",
+                                message=f"Found {len(results)} web results for \"{search_query}\"",
+                                metadata={"query": search_query, "results": results},
+                            )
+                        )
+                    fetched_urls = []
+                    # Fetch top pages if fetch_page_tool is available
+                    if self.fetch_page_tool and results:
+                        import urllib.parse
+                        from time import perf_counter
+
+                        for hit in results[:3]:
+                            hit_url = hit.get("url")
+                            hit_title = hit.get("title", "")
+                            if hit_url:
+                                hit_domain = urllib.parse.urlparse(hit_url).netloc.replace("www.", "")
+                                t_fstart = perf_counter()
+                                if context.event_bus:
+                                    from app.events import ExecutionEvent, ExecutionEventType
+                                    await context.event_bus.publish(
+                                        ExecutionEvent(
+                                            run_id=active_run_id,
+                                            event_type=ExecutionEventType.WEB_FETCH_STARTED,
+                                            task_id=context.task.id,
+                                            capability="fetch_page",
+                                            message=f"Viewing website: {hit_title or hit_domain}",
+                                            metadata={"url": hit_url, "domain": hit_domain, "title": hit_title[:150]},
+                                        )
+                                    )
+                                fetch_res = await self.fetch_page_tool.execute(FetchPageInput(url=hit_url))
+                                f_dur_ms = round((perf_counter() - t_fstart) * 1000, 2)
+                                if fetch_res.success and fetch_res.output:
+                                    out = fetch_res.output
+                                    final_u = out.get("final_url", hit_url)
+                                    final_d = urllib.parse.urlparse(final_u).netloc.replace("www.", "")
+                                    fetched_urls.append(final_u)
+                                    if context.evidence_ledger is not None:
+                                        context.evidence_ledger.add_web_page(
+                                            url=final_u,
+                                            title=out.get("title", hit_title),
+                                            text=out.get("text", ""),
+                                            retrieval_timestamp=out.get("retrieval_timestamp", ""),
+                                            content_hash=out.get("content_hash", ""),
+                                            raw_response=fetch_res.metadata,
+                                        )
+                                    if context.event_bus:
+                                        from app.events import ExecutionEvent, ExecutionEventType
+                                        await context.event_bus.publish(
+                                            ExecutionEvent(
+                                                run_id=active_run_id,
+                                                event_type=ExecutionEventType.WEB_FETCH_COMPLETED,
+                                                task_id=context.task.id,
+                                                capability="fetch_page",
+                                                message=f"Read {out.get('title') or hit_domain}",
+                                                metadata={
+                                                    "url": final_u,
+                                                    "domain": final_d,
+                                                    "title": (out.get("title") or hit_title)[:150],
+                                                    "status": "completed",
+                                                    "bytes": out.get("bytes_downloaded") or fetch_res.metadata.get("bytes", 0),
+                                                    "latency_ms": f_dur_ms,
+                                                    "content_hash": (out.get("content_hash") or "")[:8],
+                                                },
+                                            )
+                                        )
+                                else:
+                                    err_s = str(fetch_res.error or "Fetch failed")
+                                    is_bl = (
+                                        (fetch_res.metadata and fetch_res.metadata.get("violation_type") == "security")
+                                        or "robots.txt" in err_s.lower()
+                                        or "disallowed" in err_s.lower()
+                                        or "security" in err_s.lower()
+                                    )
+                                    ev_tp = ExecutionEventType.WEB_FETCH_BLOCKED if is_bl else ExecutionEventType.WEB_FETCH_FAILED
+                                    st_nm = "blocked" if is_bl else "failed"
+                                    if context.event_bus:
+                                        from app.events import ExecutionEvent, ExecutionEventType
+                                        await context.event_bus.publish(
+                                            ExecutionEvent(
+                                                run_id=active_run_id,
+                                                event_type=ev_tp,
+                                                task_id=context.task.id,
+                                                capability="fetch_page",
+                                                message=f"{'Blocked from' if is_bl else 'Failed to read'} {hit_domain}: {err_s[:120]}",
+                                                metadata={
+                                                    "url": hit_url,
+                                                    "domain": hit_domain,
+                                                    "title": hit_title[:150],
+                                                    "status": st_nm,
+                                                    "reason": err_s[:200],
+                                                    "latency_ms": f_dur_ms,
+                                                },
+                                            )
+                                        )
+                    web_metadata["fetched_urls"] = fetched_urls
+            except Exception as exc:
+                web_metadata["error"] = str(exc)
+
+        # Ingest local RAG context if present
+        if context.retrieved_context and context.evidence_ledger is not None:
+            context.evidence_ledger.add_chunks(context.retrieved_context.chunks)
+
+        result = await self.agent.execute_subtask(
+            user_task,
+            context.task,
+            retrieved_context=context.retrieved_context,
+            evidence_ledger=context.evidence_ledger,
+        )
+
         metadata: Dict[str, Any] = {"research_result": result.model_dump()}
         if context.retrieved_context:
             metadata["retrieved_context"] = context.retrieved_context.model_dump()
-            if context.evidence_ledger is not None:
-                context.evidence_ledger.add_chunks(context.retrieved_context.chunks)
+        if web_metadata:
+            metadata["web_research"] = web_metadata
 
         return TaskExecutionResult(
             task_id=context.task.id,
@@ -88,6 +250,9 @@ class ResearchTaskAgent(TaskExecutionAgent):
             output=result.findings,
             metadata=metadata,
         )
+
+
+WebResearchTaskAgent = ResearchTaskAgent
 
 
 class AnalysisTaskAgent(TaskExecutionAgent):

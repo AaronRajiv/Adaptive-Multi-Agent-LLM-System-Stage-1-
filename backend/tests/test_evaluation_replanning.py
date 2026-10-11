@@ -182,6 +182,117 @@ async def test_evaluator_agent_4_dimension_rubric_audits_final_answer():
     assert "Citation Validity: 100.0%" in captured_prompts[0]
 
 
+@pytest.mark.asyncio
+async def test_evaluator_code_computed_total_and_groundedness_gates():
+    """Verify code computes total as sum of subscores and gates on groundedness < 15 or low citation validity."""
+    class MockGateLLM(LLMProvider):
+        async def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+            return ""
+
+        async def generate_structured(self, prompt: str, schema: Any, system_prompt: Optional[str] = None) -> Any:
+            # Model attempts to report a high total score (85) and PASS status
+            return EvaluationResult(
+                score=85,
+                status="PASS",
+                feedback="Model claim of passing output.",
+                groundedness_score=10,  # Below 15 gate
+                coverage_score=25,
+                distinction_score=25,
+                honesty_score=25,
+            )
+
+    llm = MockGateLLM()
+    evaluator = EvaluatorAgent(llm, pass_threshold=80)
+
+    # 1. Test groundedness < 15 gate flips PASS to FAIL even with high subscore sum (85)
+    res = await evaluator.evaluate(user_task="Test task", analysis="Analysis", final_answer="Answer")
+    assert res.score == 85  # 10 + 25 + 25 + 25
+    assert res.status == "FAIL"
+    assert "GATE FAILED" in res.feedback
+    assert "Groundedness score (10/25) failed minimum gate threshold (15/25)" in res.feedback
+
+    # 2. Test programmatic citation validity < threshold gate flips PASS to FAIL
+    class MockPassSubscoresLLM(LLMProvider):
+        async def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+            return ""
+
+        async def generate_structured(self, prompt: str, schema: Any, system_prompt: Optional[str] = None) -> Any:
+            return EvaluationResult(
+                score=90,
+                status="PASS",
+                feedback="Good subscores.",
+                groundedness_score=20,  # >= 15
+                coverage_score=25,
+                distinction_score=25,
+                honesty_score=20,
+            )
+
+    evaluator2 = EvaluatorAgent(MockPassSubscoresLLM(), pass_threshold=80)
+    failed_ver = GroundingVerificationResult(
+        total_citations=2,
+        valid_citations=0,
+        citation_validity=0.0,
+        passed=False,
+    )
+    res2 = await evaluator2.evaluate(user_task="Test", analysis="Analysis", final_answer="Answer", verification_result=failed_ver)
+    assert res2.score == 90  # 20 + 25 + 25 + 20
+    assert res2.status == "FAIL"
+    assert "Citation validity (0.0%) below threshold (80%)" in res2.feedback
+
+
+@pytest.mark.asyncio
+async def test_evaluator_prompt_includes_evidence_ledger_chunk_text():
+    """Verify that actual evidence ledger chunk text is included in the evaluator prompt."""
+    from app.knowledge.models import RetrievedChunk
+    from app.orchestration.evidence_ledger import EvidenceLedger
+
+    captured = []
+
+    class MockPromptCaptureLLM(LLMProvider):
+        async def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+            return ""
+
+        async def generate_structured(self, prompt: str, schema: Any, system_prompt: Optional[str] = None) -> Any:
+            captured.append(prompt)
+            return EvaluationResult(
+                score=90,
+                status="PASS",
+                feedback="Grounded.",
+                groundedness_score=25,
+                coverage_score=25,
+                distinction_score=20,
+                honesty_score=20,
+            )
+
+    ledger = EvidenceLedger()
+    ledger.add_chunk(
+        RetrievedChunk(
+            id="chunk-f1-mass",
+            document_id="fia_2025.pdf",
+            chunk_index=0,
+            source="fia_2025.pdf",
+            content="Article 4.1 explicitly mandates the minimum mass without fuel is 798 kg.",
+            similarity_score=0.98,
+            metadata={"article_path": "4.1", "label": "FIA 2025"},
+        )
+    )
+
+    evaluator = EvaluatorAgent(MockPromptCaptureLLM(), pass_threshold=80)
+    await evaluator.evaluate(
+        user_task="What is car minimum mass?",
+        analysis="Analysis",
+        final_answer="The minimum mass is 798 kg [FIA 2025, art 4.1].",
+        evidence_ledger=ledger,
+    )
+
+    assert len(captured) == 1
+    eval_prompt = captured[0]
+    # Assert actual chunk text is present in the evaluator prompt
+    assert "Evidence Ledger Source Chunks (Ground Truth Evidence):" in eval_prompt
+    assert "Article 4.1 explicitly mandates the minimum mass without fuel is 798 kg." in eval_prompt
+    assert "[chunk-f1-mass]" in eval_prompt or "fia_2025.pdf" in eval_prompt
+
+
 # ==============================================================================
 # 3. Targeted Iterative Replanning Tests
 # ==============================================================================

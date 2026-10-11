@@ -320,3 +320,131 @@ class StructureAwareChunker(Chunker):
             heading=heading,
             metadata=meta,
         )
+
+
+class WebPageChunker(Chunker):
+    """
+    Paragraph and heading boundary chunker specifically for web pages.
+    Preserves page title and active section heading across chunks.
+    Does not apply regulatory structure or article-numbering heuristics.
+    """
+
+    def __init__(
+        self,
+        target_tokens: int = 500,
+        max_tokens: int = 800,
+        overlap_tokens: int = 50,
+    ):
+        if target_tokens < 10:
+            raise ValueError("target_tokens must be at least 10.")
+        if max_tokens < target_tokens:
+            raise ValueError("max_tokens must be >= target_tokens.")
+        self.target_tokens = target_tokens
+        self.max_tokens = max_tokens
+        self.overlap_tokens = overlap_tokens
+
+    def chunk(self, document: KnowledgeDocument) -> List[DocumentChunk]:
+        content = document.content.strip()
+        if not content:
+            raise ValueError("Document content cannot be empty or whitespace only.")
+
+        page_title = (
+            document.metadata.get("title")
+            or document.metadata.get("document_label")
+            or document.source
+            or "Web Document"
+        ).strip()
+        url = document.metadata.get("url") or document.source
+        content_hash = document.metadata.get("content_hash", "")
+
+        # Split on markdown headings or double newlines into logical blocks
+        raw_paragraphs = [p.strip() for p in re.split(r"\n\s*\n", content) if p.strip()]
+
+        chunks: List[DocumentChunk] = []
+        current_heading = page_title
+        current_block: List[str] = []
+        current_tokens = 0
+        chunk_idx = 0
+
+        heading_re = re.compile(r"^(?:#{1,6}\s+)?([A-Z0-9][^\n]{2,80})$", re.MULTILINE)
+
+        for para in raw_paragraphs:
+            # Check if this paragraph is a heading
+            lines = para.split("\n")
+            if len(lines) == 1 and (para.startswith("#") or (len(para) < 80 and not para.endswith("."))):
+                # Update current active heading
+                clean_heading = re.sub(r"^#+\s*", "", para).strip()
+                if clean_heading:
+                    current_heading = clean_heading
+
+            para_tokens = max(1, len(para) // 4)
+
+            if current_tokens + para_tokens > self.max_tokens and current_block:
+                chunk_text = "\n\n".join(current_block)
+                chunks.append(
+                    self._create_web_chunk(
+                        document=document,
+                        chunk_index=chunk_idx,
+                        content=chunk_text,
+                        page_title=page_title,
+                        heading=current_heading,
+                        url=url,
+                        content_hash=content_hash,
+                    )
+                )
+                chunk_idx += 1
+                current_block = [para]
+                current_tokens = para_tokens
+            else:
+                current_block.append(para)
+                current_tokens += para_tokens
+
+        if current_block:
+            chunk_text = "\n\n".join(current_block)
+            chunks.append(
+                self._create_web_chunk(
+                    document=document,
+                    chunk_index=chunk_idx,
+                    content=chunk_text,
+                    page_title=page_title,
+                    heading=current_heading,
+                    url=url,
+                    content_hash=content_hash,
+                )
+            )
+
+        return chunks
+
+    def _create_web_chunk(
+        self,
+        document: KnowledgeDocument,
+        chunk_index: int,
+        content: str,
+        page_title: str,
+        heading: str,
+        url: str,
+        content_hash: str,
+    ) -> DocumentChunk:
+        embedding_text = f"[{page_title} | {heading}]\n{content}"
+        meta = dict(document.metadata)
+        meta.update(
+            {
+                "source_type": "web",
+                "page_title": page_title,
+                "heading": heading,
+                "url": url,
+                "content_hash": content_hash,
+                "embedding_text": embedding_text,
+                "chunk_index": chunk_index,
+            }
+        )
+
+        return DocumentChunk(
+            id=f"{document.id}:web:{chunk_index}",
+            document_id=document.id,
+            chunk_index=chunk_index,
+            source=url,
+            content=content,
+            heading=heading,
+            metadata=meta,
+        )

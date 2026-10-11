@@ -8,8 +8,9 @@ import json
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.events import ExecutionEvent, ExecutionEventType, event_bus_registry
@@ -526,6 +527,13 @@ async def run_pipeline(request: RunRequest):
         )
     finally:
         ACTIVE_RUN_TASKS.pop(run_id, None)
+        bus = await event_bus_registry.get(run_id)
+        if bus:
+            try:
+                run_repo = get_run_repository(settings)
+                await run_repo.save_events(run_id, bus.history)
+            except Exception as e:
+                logger.error("Failed to persist events for run_id=%s: %s", run_id, str(e))
 
 
 @router.post("/runs/{run_id}/cancel")
@@ -556,11 +564,16 @@ async def cancel_run(run_id: str):
         await bus.emit(
             ExecutionEvent(
                 run_id=run_id,
-                event_type=ExecutionEventType.RUN_FAILED,
+                event_type=ExecutionEventType.RUN_CANCELLED,
                 source="USER",
                 data={"error": "Pipeline execution cancelled by user request."},
             )
         )
+        try:
+            run_repo = get_run_repository(settings)
+            await run_repo.save_events(run_id, bus.history)
+        except Exception:
+            pass
     return {
         "run_id": run_id,
         "status": "cancelled",
@@ -638,12 +651,49 @@ async def list_recent_runs() -> List[RunResponse]:
 
 
 @router.get("/runs/{run_id}/events")
-async def stream_run_events(run_id: str):
-    """Server-Sent Events stream for a pipeline execution run."""
+async def get_or_stream_run_events(
+    run_id: str,
+    request: Request,
+    after_seq: Optional[int] = Query(None, description="Return events strictly after this sequence number"),
+    stream: Optional[bool] = Query(None, description="Force streaming SSE mode if true, or JSON list if false"),
+):
+    """
+    Server-Sent Events stream or JSON replay for pipeline execution events.
+    Supports ?after_seq=N for reconnects and replay without duplicated events.
+    """
+    accept = request.headers.get("accept", "")
+    is_json = stream is False or ("application/json" in accept and "text/event-stream" not in accept)
+
+    run_repo = get_run_repository(settings)
+
+    if is_json:
+        # Non-SSE request: return JSON replay list directly
+        bus = await event_bus_registry.get(run_id)
+        if bus and bus.history:
+            events = await bus.get_events(after_seq=after_seq)
+        else:
+            events = await run_repo.get_events(run_id, after_seq=after_seq)
+
+        if not events:
+            # Check if run exists at all
+            if run_id not in RUNS_INDEX and not await run_repo.get_run(run_id):
+                if not any(r.run_id == run_id for r in get_recent_runs()):
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Run '{run_id}' not found.",
+                    )
+        return [event.model_dump() for event in events]
+
+    # SSE streaming mode
     bus = await event_bus_registry.get_or_create(run_id)
+    if not bus.history:
+        persisted = await run_repo.get_events(run_id)
+        if persisted:
+            async with bus._lock:
+                bus._history.extend(persisted)
 
     async def event_generator():
-        queue = await bus.subscribe()
+        queue = await bus.subscribe(after_seq=after_seq)
         try:
             while True:
                 try:
@@ -666,4 +716,138 @@ async def stream_run_events(run_id: str):
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+class EvidencePassageResponse(BaseModel):
+    evidence_id: str
+    chunk_id: Optional[str] = None
+    citation: Optional[str] = None
+    source_type: str = "document"
+    document_id: Optional[str] = None
+    document_label: Optional[str] = None
+    title: Optional[str] = None
+    article_path: Optional[str] = None
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
+    url: Optional[str] = None
+    text: str = ""
+    similarity_score: Optional[float] = None
+    retrieval_timestamp: Optional[str] = None
+
+
+@router.get("/runs/{run_id}/evidence/{evidence_id}", response_model=EvidencePassageResponse)
+async def get_run_evidence(run_id: str, evidence_id: str):
+    """
+    Retrieve the stored passage for an evidence item or citation in a run,
+    allowing citation clicks in the UI to open verbatim source cards.
+    """
+    run_repo = get_run_repository(settings)
+    run_obj: Optional[Dict[str, Any]] = None
+
+    if run_id in RUNS_INDEX and RUNS_INDEX[run_id].get("result"):
+        res = RUNS_INDEX[run_id]["result"]
+        run_obj = res if isinstance(res, dict) else res.model_dump()
+    else:
+        stored = await run_repo.get_run(run_id)
+        if stored:
+            run_obj = stored.model_dump()
+        else:
+            for r in get_recent_runs():
+                if r.run_id == run_id:
+                    run_obj = r.model_dump()
+                    break
+
+    if not run_obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Run '{run_id}' not found.",
+        )
+
+    norm_target = evidence_id.strip().strip("[]").lower()
+    hash_target = norm_target[4:] if norm_target.startswith("web:") else norm_target
+
+    # 1. Search in evidence_ledger
+    ledger = run_obj.get("evidence_ledger") or {}
+    items = ledger.get("items", {}) if isinstance(ledger, dict) else {}
+    if isinstance(items, dict):
+        item_list = list(items.values())
+    elif isinstance(items, list):
+        item_list = items
+    else:
+        item_list = []
+
+    matched_item = None
+    for item in item_list:
+        if not isinstance(item, dict):
+            continue
+        chunk_id = str(item.get("chunk_id", "")).lower()
+        citation = str(item.get("citation", "")).strip().strip("[]").lower()
+        content_hash = str(item.get("content_hash", "")).lower()
+        article_path = str(item.get("article_path", "")).lower()
+        url = str(item.get("url", "")).lower()
+
+        # Exact ID or citation match
+        if chunk_id == norm_target or citation == norm_target:
+            matched_item = item
+            break
+        # Hash match
+        if hash_target and (content_hash.startswith(hash_target) or hash_target in chunk_id or hash_target in citation):
+            matched_item = item
+            break
+        # Article match (e.g. "art 3.4.1" or "3.4.1")
+        if article_path and (norm_target == article_path or norm_target == f"art {article_path}" or f"art {article_path}" in norm_target):
+            matched_item = item
+            break
+        # URL match
+        if url and (norm_target in url or url in norm_target):
+            matched_item = item
+            break
+
+    # 2. Search in retrieved_chunks if not matched yet
+    if not matched_item:
+        chunks = run_obj.get("retrieved_chunks", [])
+        for chunk in chunks:
+            if not isinstance(chunk, dict):
+                continue
+            c_id = str(chunk.get("id", "")).lower()
+            meta = chunk.get("metadata", {}) or {}
+            c_art = str(meta.get("article_path", meta.get("article", ""))).lower()
+            if c_id == norm_target or (c_art and (norm_target == c_art or norm_target == f"art {c_art}" or f"art {c_art}" in norm_target)):
+                matched_item = {
+                    "chunk_id": chunk.get("id"),
+                    "citation": meta.get("citation", f"[{meta.get('label', 'doc')}]"),
+                    "source_type": "document",
+                    "document_id": chunk.get("document_id"),
+                    "document_label": meta.get("label") or meta.get("document_label"),
+                    "title": meta.get("heading") or meta.get("document_label"),
+                    "article_path": meta.get("article_path"),
+                    "page_start": meta.get("page_start"),
+                    "page_end": meta.get("page_end"),
+                    "text": chunk.get("content", ""),
+                    "similarity_score": chunk.get("similarity_score"),
+                }
+                break
+
+    if not matched_item:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Evidence passage '{evidence_id}' not found in run '{run_id}'.",
+        )
+
+    return EvidencePassageResponse(
+        evidence_id=evidence_id,
+        chunk_id=matched_item.get("chunk_id"),
+        citation=matched_item.get("citation"),
+        source_type=matched_item.get("source_type", "document"),
+        document_id=matched_item.get("document_id"),
+        document_label=matched_item.get("document_label"),
+        title=matched_item.get("heading") or matched_item.get("title") or matched_item.get("document_label"),
+        article_path=matched_item.get("article_path"),
+        page_start=matched_item.get("page_start"),
+        page_end=matched_item.get("page_end"),
+        url=matched_item.get("url"),
+        text=matched_item.get("text", ""),
+        similarity_score=matched_item.get("similarity_score"),
+        retrieval_timestamp=matched_item.get("retrieval_timestamp"),
     )

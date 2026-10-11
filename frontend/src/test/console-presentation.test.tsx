@@ -106,4 +106,71 @@ describe("Execution presentation", () => {
     expect(container.querySelector("animateMotion")?.getAttribute("dur")).toBe("3.6s");
     expect(container.querySelector("circle")?.getAttribute("r")).toBe("1.8");
   });
+
+  it("TelemetryConsole renders Live Web Research badge and rationale on Strategy tab", async () => {
+    const { TelemetryConsole } = await import("@/components/telemetry/TelemetryConsole");
+    const run = adaptRun({
+      run_id: "test-web-run",
+      strategy: "SINGLE_AGENT",
+      evidence_ledger: {
+        items: [
+          {
+            id: "web:abc12345",
+            source: "https://fia.com/regulations",
+            content: "The 2026 MGU-K generates 350kW.",
+            metadata: {
+              url: "https://fia.com/regulations",
+              domain: "fia.com",
+              title: "FIA Technical Regulations 2026",
+            },
+          },
+        ],
+      },
+    });
+
+    const events = [
+      {
+        id: "evt-1",
+        label: "STRATEGY_DECIDED",
+        message: "Strategy selected",
+        source: "SSE",
+        time: "12:00:00",
+        rawType: "STRATEGY_DECIDED",
+        payload: {
+          strategy: "SINGLE_AGENT",
+          needs_web: true,
+          rationale: "Requires official 2026 FIA engine specs",
+        },
+      },
+    ];
+
+    const { rerender } = render(
+      <TelemetryConsole
+        events={events}
+        run={run}
+        activeTab="strategy"
+        setActiveTab={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("Live Web Research Enabled")).toBeInTheDocument();
+    expect(screen.getByText("TAVILY SEARCH")).toBeInTheDocument();
+    expect(screen.getByText("Requires official 2026 FIA engine specs")).toBeInTheDocument();
+
+    // Now switch to evidence tab
+    rerender(
+      <TelemetryConsole
+        events={events}
+        run={run}
+        activeTab="evidence"
+        setActiveTab={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("Web Evidence")).toBeInTheDocument();
+    expect(screen.getByText("The 2026 MGU-K generates 350kW.")).toBeInTheDocument();
+    const link = screen.getByRole("link", { name: /fia\.com/i });
+    expect(link).toHaveAttribute("href", "https://fia.com/regulations");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer nofollow");
+  });
 });

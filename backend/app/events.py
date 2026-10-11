@@ -34,6 +34,13 @@ class ExecutionEventType(str, Enum):
     RAG_STARTED = "RAG_STARTED"
     RAG_COMPLETED = "RAG_COMPLETED"
 
+    WEB_SEARCH_STARTED = "WEB_SEARCH_STARTED"
+    WEB_SEARCH_COMPLETED = "WEB_SEARCH_COMPLETED"
+    WEB_FETCH_STARTED = "WEB_FETCH_STARTED"
+    WEB_FETCH_COMPLETED = "WEB_FETCH_COMPLETED"
+    WEB_FETCH_BLOCKED = "WEB_FETCH_BLOCKED"
+    WEB_FETCH_FAILED = "WEB_FETCH_FAILED"
+
     EVALUATION_STARTED = "EVALUATION_STARTED"
     EVALUATION_COMPLETED = "EVALUATION_COMPLETED"
 
@@ -47,12 +54,14 @@ class ExecutionEventType(str, Enum):
 
     RUN_COMPLETED = "RUN_COMPLETED"
     RUN_FAILED = "RUN_FAILED"
+    RUN_CANCELLED = "RUN_CANCELLED"
 
 
 class ExecutionEvent(BaseModel):
     """A single typed event emitted during pipeline execution."""
 
     event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    seq: Optional[int] = Field(default=None, description="Per-run monotonic sequence number starting at 1")
     run_id: str = Field(..., description="The pipeline run this event belongs to")
     timestamp: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(),
@@ -84,10 +93,44 @@ class RunEventBus:
         self._subscribers: List[asyncio.Queue[ExecutionEvent | None]] = []
         self._finished = False
         self._lock = asyncio.Lock()
+        self._next_seq = 0
+
+    def _sanitize_data(self, val: Any) -> Any:
+        if isinstance(val, str):
+            return val[:300]
+        if isinstance(val, dict):
+            clean: Dict[str, Any] = {}
+            for k, v in val.items():
+                k_lower = str(k).lower()
+                if any(sec in k_lower for sec in ["key", "token", "secret", "auth", "password", "prompt"]):
+                    continue
+                if k == "text" or k == "content":
+                    clean[k] = str(v)[:250] if v is not None else ""
+                elif k in ("query", "title", "url", "reason", "error"):
+                    clean[k] = str(v)[:250] if v is not None else ""
+                elif isinstance(v, (dict, list)):
+                    clean[k] = self._sanitize_data(v)
+                else:
+                    clean[k] = v
+            return clean
+        if isinstance(val, list):
+            return [self._sanitize_data(item) for item in val[:15]]
+        return val
+
+    def _sanitize_event(self, event: ExecutionEvent) -> None:
+        if event.message:
+            event.message = event.message[:300]
+        if event.metadata:
+            event.metadata = self._sanitize_data(event.metadata)
 
     async def emit(self, event: ExecutionEvent) -> None:
         """Publish an event to all current subscribers and append to history."""
         async with self._lock:
+            self._next_seq += 1
+            if event.seq is None:
+                event.seq = self._next_seq
+            self._sanitize_event(event)
+
             self._history.append(event)
             if len(self._history) > self._max_history:
                 self._history = self._history[-self._max_history:]
@@ -96,6 +139,8 @@ class RunEventBus:
                     queue.put_nowait(event)
                 except asyncio.QueueFull:
                     pass  # Drop if subscriber is too slow; pipeline must not block
+
+    publish = emit
 
     async def finish(self) -> None:
         """Signal all subscribers that no more events will be emitted."""
@@ -107,17 +152,19 @@ class RunEventBus:
                 except asyncio.QueueFull:
                     pass
 
-    async def subscribe(self) -> asyncio.Queue[ExecutionEvent | None]:
+    async def subscribe(self, after_seq: Optional[int] = None) -> asyncio.Queue[ExecutionEvent | None]:
         """
         Create a new subscriber queue.
 
         Returns a queue that yields ExecutionEvent instances, then None when the
-        run completes. Late subscribers receive the full buffered history first.
+        run completes. Late subscribers receive the full buffered history (or events > after_seq).
         """
         queue: asyncio.Queue[ExecutionEvent | None] = asyncio.Queue(maxsize=1000)
         async with self._lock:
             # Replay buffered history
             for event in self._history:
+                if after_seq is not None and event.seq is not None and event.seq <= after_seq:
+                    continue
                 try:
                     queue.put_nowait(event)
                 except asyncio.QueueFull:
@@ -130,6 +177,13 @@ class RunEventBus:
             else:
                 self._subscribers.append(queue)
         return queue
+
+    async def get_events(self, after_seq: Optional[int] = None) -> List[ExecutionEvent]:
+        """Return history snapshot, optionally filtered to seq > after_seq."""
+        async with self._lock:
+            if after_seq is None:
+                return list(self._history)
+            return [e for e in self._history if e.seq is not None and e.seq > after_seq]
 
     async def unsubscribe(self, queue: asyncio.Queue[ExecutionEvent | None]) -> None:
         """Remove a subscriber queue (idempotent)."""

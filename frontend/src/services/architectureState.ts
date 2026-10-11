@@ -71,8 +71,8 @@ export const ARCHITECTURE_NODES_INITIAL: ArchitectureNode[] = [
   },
   {
     id: "tools",
-    label: "Tool Registry",
-    subtitle: "Controlled Tools",
+    label: "Web & Tools",
+    subtitle: "Search & Fetch Tools",
     status: "IDLE",
     isConditional: true,
     x: 80,
@@ -296,6 +296,54 @@ export function updateArchitectureFromEvent(
       spawnParticle("tools", "agents", 700);
       break;
 
+    case "WEB_SEARCH_STARTED": {
+      nextToolsUsed = true;
+      const q = String(event.metadata?.["query"] || event.payload?.["query"] || "");
+      setStatus("tools", "ACTIVE", q ? `Search: ${q.slice(0, 24)}...` : "Searching web...");
+      spawnParticle("orchestrator", "tools", 750, "#06b6d4");
+      break;
+    }
+
+    case "WEB_SEARCH_COMPLETED": {
+      nextToolsUsed = true;
+      const resultCount = (event.metadata?.["result_count"] ?? event.payload?.["result_count"]) as number | undefined;
+      const urls = (event.metadata?.["urls"] || event.payload?.["urls"] || []) as unknown[];
+      const count = resultCount !== undefined ? resultCount : (Array.isArray(urls) ? urls.length : 1);
+      setStatus("tools", "ACTIVE", `Found ${count} result(s)`);
+      spawnParticle("tools", "agents", 750, "#06b6d4");
+      break;
+    }
+
+    case "WEB_FETCH_STARTED": {
+      nextToolsUsed = true;
+      const dom = String(event.metadata?.["domain"] || event.payload?.["domain"] || "source");
+      setStatus("tools", "ACTIVE", `Reading ${dom}...`);
+      spawnParticle("orchestrator", "tools", 700, "#10b981");
+      break;
+    }
+
+    case "WEB_FETCH_COMPLETED": {
+      nextToolsUsed = true;
+      const dom = String(event.metadata?.["domain"] || event.payload?.["domain"] || "source");
+      setStatus("tools", "COMPLETED", `Read ${dom}`);
+      spawnParticle("tools", "agents", 700, "#10b981");
+      break;
+    }
+
+    case "WEB_FETCH_BLOCKED": {
+      nextToolsUsed = true;
+      const dom = String(event.metadata?.["domain"] || event.payload?.["domain"] || "source");
+      setStatus("tools", "BLOCKED", `Blocked: ${dom}`);
+      break;
+    }
+
+    case "WEB_FETCH_FAILED": {
+      nextToolsUsed = true;
+      const dom = String(event.metadata?.["domain"] || event.payload?.["domain"] || "source");
+      setStatus("tools", "FAILED", `Failed: ${dom}`);
+      break;
+    }
+
     case "EVALUATION_STARTED":
       setStatus("evaluation", "ACTIVE", "Auditing quality");
       spawnParticle("agents", "evaluation", 750);
@@ -314,14 +362,31 @@ export function updateArchitectureFromEvent(
       setStatus("synthesis", "ACTIVE", "Consolidating response");
       break;
 
+    case "STRATEGY_DECIDED":
     case "STRATEGY_SELECTED": {
-      const strat = (event.payload?.["strategy"] as string | undefined) || "MULTI_AGENT";
+      const meta = event.metadata || event.payload || {};
+      const strat = (meta["strategy"] as string | undefined) || "MULTI_AGENT";
+      const needsWeb = Boolean(meta["needs_web"]);
       nextSelectedStrategy = strat;
+      if (needsWeb) {
+        nextToolsUsed = true;
+        const toolsNode = getNode("tools");
+        if (toolsNode) {
+          toolsNode.subtitle = "Web Research (Active)";
+          toolsNode.status = "READY";
+          toolsNode.detail = "Web search enabled";
+        }
+        spawnParticle("planner", "tools", 700, "#06b6d4");
+      }
       if (strat === "DIRECT") {
         setStatus("api_gateway", "COMPLETED", "Direct Execution");
         spawnParticle("api_gateway", "synthesis", 700);
       } else if (strat === "SINGLE_AGENT") {
         setStatus("api_gateway", "COMPLETED", "Single-Agent Execution");
+        setStatus("orchestrator", "ACTIVE");
+        setStatus("agents", "ACTIVE");
+        spawnParticle("api_gateway", "orchestrator", 650);
+        spawnParticle("orchestrator", "agents", 700);
       }
       break;
     }
@@ -346,6 +411,7 @@ export function updateArchitectureFromEvent(
         setStatus("synthesis", "COMPLETED");
         setStatus("final_answer", "COMPLETED");
         if (nextRagUsed) setStatus("rag", "COMPLETED");
+        if (nextToolsUsed) setStatus("tools", "COMPLETED");
       } else {
         nextNodes.forEach((node) => {
           if (node.id === "rag" && !nextRagUsed) return;

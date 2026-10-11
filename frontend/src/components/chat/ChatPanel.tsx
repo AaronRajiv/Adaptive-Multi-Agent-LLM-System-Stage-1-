@@ -17,14 +17,15 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TypewriterMarkdown } from "@/components/chat/TypewriterMarkdown";
-import { ThinkingAccordion } from "@/components/chat/ThinkingAccordion";
+import { ResearchActivityFeed } from "@/components/chat/ResearchActivityFeed";
+import { EvidencePassageModal } from "@/components/chat/EvidencePassageModal";
 import type { ChatMessage } from "@/types/execution";
 
 interface Props {
   messages: ChatMessage[];
   task: string;
   setTask: (task: string) => void;
-  onSubmit: (files?: File[]) => void;
+  onSubmit: (files?: File[], overridePrompt?: string) => void;
   running: boolean;
   onClear: () => void;
   presets: { label: string; task: string }[];
@@ -43,6 +44,7 @@ export function ChatPanel({
   onOpenEvidence,
 }: Props) {
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [inspectCitation, setInspectCitation] = useState<{ runId?: string; citation: string } | null>(null);
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatBottomRef = useRef<HTMLDivElement>(null);
@@ -62,10 +64,16 @@ export function ChatPanel({
     setAttachedFiles((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const handleSubmitForm = (e?: React.FormEvent) => {
+  const handleSubmitForm = (
+    e?: React.FormEvent,
+    overridePrompt?: string,
+    overrideFiles?: File[]
+  ) => {
     if (e) e.preventDefault();
-    if (running || !task.trim()) return;
-    onSubmit(attachedFiles);
+    const promptText = (overridePrompt ?? task).trim();
+    if (running || !promptText) return;
+    const filesToSend = overrideFiles ?? attachedFiles;
+    onSubmit(filesToSend, promptText);
     setAttachedFiles([]);
   };
 
@@ -107,8 +115,15 @@ export function ChatPanel({
         )}
 
         {/* Render Conversation Thread Messages */}
-        {messages.map((msg) =>
-          msg.role === "user" ? (
+        {messages.map((msg, index) => {
+          const priorUserMsg = messages
+            .slice(0, index)
+            .reverse()
+            .find((m) => m.role === "user");
+          const retryPrompt = priorUserMsg?.content || task;
+          const retryFiles = priorUserMsg?.files;
+
+          return msg.role === "user" ? (
             <div key={msg.id} className="flex items-start gap-3 max-w-3xl mx-auto">
               <div className="w-7 h-7 rounded-full bg-neutral-800 border border-white/10 flex items-center justify-center flex-shrink-0 text-neutral-300">
                 <User size={13} />
@@ -138,8 +153,15 @@ export function ChatPanel({
                 <Bot size={13} />
               </div>
               <div className="flex-1 space-y-3">
-                {/* AI Thinking / Reasoning Accordion */}
-                <ThinkingAccordion events={msg.events || []} running={Boolean(msg.running)} />
+                {/* Live Research Activity Feed & Sources (Real backend events) */}
+                <ResearchActivityFeed
+                  events={msg.events || []}
+                  running={Boolean(msg.running)}
+                  runId={msg.runId}
+                  finalAnswer={msg.content}
+                  statusMessage={msg.statusMessage}
+                  onCitationClick={(cit) => setInspectCitation({ runId: msg.runId, citation: cit })}
+                />
 
                 {/* Error Notice */}
                 {msg.error && (
@@ -152,8 +174,12 @@ export function ChatPanel({
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="text-xs text-red-400 hover:text-red-300 p-0 h-auto"
-                      onClick={() => handleSubmitForm()}
+                      className="text-xs text-red-400 hover:text-red-300 p-0 h-auto cursor-pointer"
+                      onClick={() => {
+                        if (retryPrompt) {
+                          handleSubmitForm(undefined, retryPrompt, retryFiles);
+                        }
+                      }}
                     >
                       <RotateCcw size={12} className="mr-1" /> Retry Execution
                     </Button>
@@ -221,13 +247,18 @@ export function ChatPanel({
                         </Button>
                       </div>
                     </div>
-                    <TypewriterMarkdown content={msg.content} speedMs={10} />
+                    <TypewriterMarkdown
+                      content={msg.content}
+                      speedMs={10}
+                      validCitations={msg.validCitations}
+                      onCitationClick={(cit) => setInspectCitation({ runId: msg.runId, citation: cit })}
+                    />
                   </div>
                 )}
               </div>
             </div>
-          )
-        )}
+          );
+        })}
 
         <div ref={chatBottomRef} />
       </div>
@@ -313,6 +344,13 @@ export function ChatPanel({
           </button>
         </div>
       </form>
+
+      <EvidencePassageModal
+        runId={inspectCitation?.runId}
+        evidenceId={inspectCitation?.citation || null}
+        isOpen={Boolean(inspectCitation)}
+        onClose={() => setInspectCitation(null)}
+      />
     </div>
   );
 }

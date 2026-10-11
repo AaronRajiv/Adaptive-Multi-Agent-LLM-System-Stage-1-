@@ -19,8 +19,12 @@ import re
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
+from app.config import settings
 from app.llm.base import LLMProvider
+from app.logging_config import get_logger
 from app.models.schemas import ChatMessagePayload
+
+logger = get_logger("app.orchestration.strategy")
 
 
 class ExecutionStrategy(str, Enum):
@@ -61,12 +65,20 @@ class StrategyDecision(BaseModel):
         default=None,
         description="Resource budget constraints (max_llm_calls, max_tokens, max_wall_time) allocated",
     )
+    needs_web: bool = Field(
+        default=False,
+        description="Whether fresh external information via live web search is required",
+    )
+    web_rationale: Optional[str] = Field(
+        default=None,
+        description="Detailed justification explaining why web search is or is not required",
+    )
 
 
 STRATEGY_SELECTOR_PROMPT = """You are an adaptive Execution Strategy Selector in a resource-aware multi-agent AI system.
 Your job is to evaluate incoming user requests and select the most appropriate, resource-efficient execution strategy.
 
-Evaluate the request across 4 explicit criteria:
+Evaluate the request across 5 explicit criteria:
 1. Task Length and Structure:
    - Simple conversational greetings/pleasantries -> DIRECT.
    - Focused, single-step questions or drafting -> SINGLE_AGENT or SINGLE_AGENT_RAG.
@@ -80,6 +92,15 @@ Evaluate the request across 4 explicit criteria:
    - If documents are attached but the user asks a greeting or unrelated math -> requires_rag=false.
 4. Need for Cross-Document Reasoning:
    - Comparing multiple documents, regulations, or distinct sections -> cross_document_reasoning=true -> MULTI_AGENT.
+5. Need for Live Web Search (needs_web):
+   - Set needs_web=true if:
+     * The task asks for current, recent, or real-time information (e.g. 2024-2026 regulations, news, updates, market prices, technical trends, external facts, announcements).
+     * The user explicitly mentions searching the web, online sources, google, or checking external references.
+     * No attached documents are present, and the question is an empirical or factual real-world inquiry requiring external evidence rather than purely self-contained programming/math or pleasantries.
+   - Set needs_web=false if:
+     * The task is strictly asking about the contents of an attached document or uploaded file (e.g. "according to the uploaded PDF", "in Article 4.1 of the regulations").
+     * The task is a conversational greeting, pleasantry, mathematical calculation, algorithm/coding puzzle, or generic definition that does not require live web data.
+   - Always provide web_rationale justifying the needs_web decision.
 
 Execution Strategies:
 - DIRECT: Conversational greetings, pleasantries, acknowledgments.
@@ -99,6 +120,14 @@ class StrategySelector:
         "engine", "battery", "thermal", "cooling", "mass", "weight", "dimensions",
         "regulations", "compliance", "safety", "cost", "financial", "cap", "tires",
         "brakes", "telemetry", "software", "logistics", "strategy"
+    ]
+
+    WEB_CUE_KEYWORDS = [
+        "search the web", "web search", "google", "online", "latest", "recent", "news",
+        "today", "current", "update", "updates", "website", "internet",
+        "external sources", "real-time", "press release", "2024", "2025", "2026",
+        "market", "price", "trends", "forecast", "announcement", "who won", "what happened",
+        "overview of", "status of", "what is the latest"
     ]
 
     def __init__(self, llm_provider: Optional[LLMProvider] = None):
@@ -127,22 +156,30 @@ class StrategySelector:
         if len(cleaned) <= 80:
             for pattern in pure_greeting_patterns:
                 if re.match(pattern, cleaned):
-                    return StrategyDecision(
+                    decision = StrategyDecision(
                         strategy=ExecutionStrategy.DIRECT,
                         reasoning="Task is a conversational greeting or simple pleasantry.",
                         estimated_complexity="LOW",
                         requires_rag=False,
                         domains=[],
                         cross_document_reasoning=False,
+                        needs_web=False,
+                        web_rationale="Conversational greetings do not require external web data.",
                     )
+                    logger.info(
+                        "StrategySelector decision: strategy=%s, needs_web=%s, reasoning=%s",
+                        decision.strategy.value, decision.needs_web, decision.reasoning
+                    )
+                    return decision
 
         # -------------------------------------------------------------
-        # 2. Extract Domains & Cross-Document Signals
+        # 2. Extract Domains & External Web Signals
         # -------------------------------------------------------------
         detected_domains = [d for d in self.KNOWN_DOMAINS if re.search(r"\b" + re.escape(d) + r"\b", cleaned)]
         has_cross_doc_cue = bool(
             re.search(r"\b(cross-reference|compare documents|between articles|across sections|multiple regulations|trade-off|tradeoff)\b", cleaned)
         )
+        has_web_cue = any(kw in cleaned for kw in self.WEB_CUE_KEYWORDS)
 
         # -------------------------------------------------------------
         # 3. Primary Classifier: Structured LLM Call
@@ -159,7 +196,7 @@ class StrategySelector:
                 f"User Task:\n\"{user_task.strip()}\"\n\n"
                 f"Classify the optimal execution strategy (DIRECT, SINGLE_AGENT, SINGLE_AGENT_RAG, or MULTI_AGENT). "
                 f"Identify the number and names of domains, whether cross-document reasoning is needed, "
-                f"and whether RAG retrieval is required."
+                f"whether RAG retrieval is required, and whether live web search (needs_web) is required with web_rationale."
             )
 
             try:
@@ -170,10 +207,24 @@ class StrategySelector:
                 )
                 if not decision.domains and detected_domains:
                     decision.domains = detected_domains
+                # Promote to MULTI_AGENT if multiple distinct regulatory articles or >= 2 domains are queried (opt-in config)
+                if settings.enable_multi_domain_rag_promotion and has_documents and decision.strategy == ExecutionStrategy.SINGLE_AGENT_RAG:
+                    article_count = len(re.findall(r"\barticle\s+\d+", cleaned))
+                    if article_count >= 2 or len(detected_domains) >= 2 or len(decision.domains) >= 2:
+                        decision.strategy = ExecutionStrategy.MULTI_AGENT
+                        decision.cross_document_reasoning = True
+                        decision.reasoning += f" (Promoted to MULTI_AGENT: covers {article_count} distinct articles / {len(detected_domains)} domains)."
+                # If explicit web search is requested, ensure needs_web is honored
+                if not decision.needs_web and any(kw in cleaned for kw in ["search the web", "web search", "search google", "search online", "look online", "google it"]):
+                    decision.needs_web = True
+                    decision.web_rationale = decision.web_rationale or "Explicit web search requested in user query."
+                logger.info(
+                    "StrategySelector decision: strategy=%s, needs_web=%s, reasoning=%s, web_rationale=%s",
+                    decision.strategy.value, decision.needs_web, decision.reasoning, decision.web_rationale
+                )
                 return decision
-            except Exception:
-                # Fallback to rules if LLM provider structured output fails
-                pass
+            except Exception as exc:
+                logger.warning("LLM structured strategy classification failed, falling back to heuristics: %s", exc)
 
         # -------------------------------------------------------------
         # 4. Fallback Rule-Based Heuristics
@@ -189,8 +240,10 @@ class StrategySelector:
             " and " in cleaned or " vs " in cleaned or " versus " in cleaned or "," in cleaned or "between" in cleaned
         )
 
+        web_rat = "Task references real-time, external, or latest developments requiring web search." if has_web_cue else "Task can be resolved from local documents or internal knowledge."
+
         if is_multi_domain or is_multi_structure or has_cross_doc_cue:
-            return StrategyDecision(
+            decision = StrategyDecision(
                 strategy=ExecutionStrategy.MULTI_AGENT,
                 reasoning=(
                     f"Task requires multi-faceted analysis across {len(detected_domains)} domain(s) "
@@ -200,48 +253,84 @@ class StrategySelector:
                 requires_rag=has_documents,
                 domains=detected_domains,
                 cross_document_reasoning=has_cross_doc_cue or (has_documents and is_multi_domain),
+                needs_web=has_web_cue,
+                web_rationale=web_rat,
             )
+            logger.info(
+                "StrategySelector decision: strategy=%s, needs_web=%s, reasoning=%s, web_rationale=%s",
+                decision.strategy.value, decision.needs_web, decision.reasoning, decision.web_rationale
+            )
+            return decision
 
         # Single-topic document query
         if has_documents and any(w in cleaned for w in ["document", "file", "pdf", "according to", "based on", "regulations", "article", "clause", "rule"]):
-            return StrategyDecision(
+            decision = StrategyDecision(
                 strategy=ExecutionStrategy.SINGLE_AGENT_RAG,
                 reasoning="Focused single-step question grounded in attached document.",
                 estimated_complexity="MEDIUM",
                 requires_rag=True,
                 domains=detected_domains,
                 cross_document_reasoning=False,
+                needs_web=has_web_cue,
+                web_rationale=web_rat,
             )
+            logger.info(
+                "StrategySelector decision: strategy=%s, needs_web=%s, reasoning=%s, web_rationale=%s",
+                decision.strategy.value, decision.needs_web, decision.reasoning, decision.web_rationale
+            )
+            return decision
 
         # Calculation or single math problem
         math_keywords = ["calc", "calculate", "solve", "+", "-", "*", "/", "%", "math", "sum", "multiply"]
         if any(kw in cleaned for kw in math_keywords) and len(cleaned) < 80:
-            return StrategyDecision(
+            decision = StrategyDecision(
                 strategy=ExecutionStrategy.SINGLE_AGENT,
                 reasoning="Direct calculation or mathematical reasoning.",
                 estimated_complexity="LOW",
                 requires_rag=False,
                 domains=[],
                 cross_document_reasoning=False,
+                needs_web=False,
+                web_rationale="Mathematical calculation does not require external web data.",
             )
+            logger.info(
+                "StrategySelector decision: strategy=%s, needs_web=%s, reasoning=%s, web_rationale=%s",
+                decision.strategy.value, decision.needs_web, decision.reasoning, decision.web_rationale
+            )
+            return decision
 
         # Writing or drafting request
         writing_keywords = ["write", "draft", "compose", "letter", "email", "memo", "essay", "article", "story"]
         if any(kw in cleaned for kw in writing_keywords):
-            return StrategyDecision(
+            decision = StrategyDecision(
                 strategy=ExecutionStrategy.SINGLE_AGENT,
                 reasoning="Writing or drafting task suitable for single-agent execution.",
                 estimated_complexity="MEDIUM",
                 requires_rag=False,
                 domains=detected_domains,
                 cross_document_reasoning=False,
+                needs_web=has_web_cue,
+                web_rationale=web_rat,
             )
+            logger.info(
+                "StrategySelector decision: strategy=%s, needs_web=%s, reasoning=%s, web_rationale=%s",
+                decision.strategy.value, decision.needs_web, decision.reasoning, decision.web_rationale
+            )
+            return decision
 
-        return StrategyDecision(
+        decision = StrategyDecision(
             strategy=ExecutionStrategy.SINGLE_AGENT,
             reasoning="Default single-agent execution for standard query.",
             estimated_complexity="LOW" if len(cleaned) < 100 else "MEDIUM",
             requires_rag=False,
             domains=detected_domains,
             cross_document_reasoning=False,
+            needs_web=has_web_cue,
+            web_rationale=web_rat,
         )
+        logger.info(
+            "StrategySelector decision: strategy=%s, needs_web=%s, reasoning=%s, web_rationale=%s",
+            decision.strategy.value, decision.needs_web, decision.reasoning, decision.web_rationale
+        )
+        return decision
+

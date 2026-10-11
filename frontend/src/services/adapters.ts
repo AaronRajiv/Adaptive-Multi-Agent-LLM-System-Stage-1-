@@ -126,10 +126,48 @@ export function adaptRun(value: unknown): ExecutionModel {
         output: text(r["final_answer"]),
       });
   }
-  const chunks = [
+  const ledger = record(r["evidence_ledger"]);
+  const rawLedgerItems = ledger["items"];
+  const ledgerItemList = Array.isArray(rawLedgerItems)
+    ? rawLedgerItems
+    : Object.values(record(rawLedgerItems));
+  const ledgerChunks: ProvenanceChunk[] = ledgerItemList.map((it) => {
+    const item = record(it);
+    const meta = record(item["metadata"]);
+    const url = text(item["url"] ?? meta["url"] ?? item["source"]);
+    const domain = text(meta["domain"] ?? item["document_id"]);
+    const isWeb =
+      text(item["source_type"]) === "web" ||
+      text(item["retrieval_method"]) === "web_fetch" ||
+      /^https?:\/\//i.test(url);
+    return {
+      id: text(item["chunk_id"] ?? item["citation"] ?? item["id"]),
+      documentId: text(domain || item["document_id"] || (isWeb ? "web" : "")),
+      source: url || text(item["document_label"] ?? item["source"]),
+      content: text(item["text"] ?? item["content"]),
+      similarity: numeric(item["similarity_score"] ?? item["score"]),
+      pageStart: numeric(item["page_start"]),
+      pageEnd: numeric(item["page_end"]),
+      articlePath: text(item["article_path"]),
+      heading: text(meta["title"] ?? item["title"] ?? item["heading"] ?? (isWeb ? domain : "")),
+      retrievalMethod: isWeb ? "web_fetch" : text(item["retrieval_method"]) || undefined,
+    };
+  });
+
+  const existingChunks = [
     ...chunksFrom(r["retrieved_chunks"] ?? r["rag_provenance"]),
     ...tasks.flatMap((t) => t["chunks"] ?? []),
   ];
+
+  const seenChunkKeys = new Set<string>();
+  const chunks: ProvenanceChunk[] = [];
+  for (const c of [...existingChunks, ...ledgerChunks]) {
+    const key = c.id || `${c.source || ""}:${c.content?.slice(0, 50) || ""}`;
+    if (!seenChunkKeys.has(key)) {
+      seenChunkKeys.add(key);
+      chunks.push(c);
+    }
+  }
   return {
     runId: text(r["run_id"]),
     task: text(r["user_task"]),

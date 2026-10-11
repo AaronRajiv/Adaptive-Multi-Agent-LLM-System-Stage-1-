@@ -74,6 +74,7 @@ class RunMetrics(BaseModel):
     total_latency_ms: float = Field(default=0.0, description="Sum of call latencies in ms")
     total_estimated_cost: float = Field(default=0.0, description="Sum of estimated USD costs")
     wall_time_ms: float = Field(default=0.0, description="Total execution wall clock duration in ms")
+    score_normalizations_count: int = Field(default=0, description="Count of evaluator subscores that exceeded 25 and were rescaled")
     calls: List[CallMetric] = Field(default_factory=list, description="Ordered list of individual call metrics")
 
 

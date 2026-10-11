@@ -6,9 +6,12 @@ and API request/response contracts.
 """
 
 from typing import Any, Dict, List, Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.logging_config import get_logger
 from app.models.task_graph import TaskGraph, TaskNode
+
+logger = get_logger("app.models.schemas")
 
 
 # Backward-compatible Stage 1 name for graph-compatible planned work.
@@ -75,6 +78,35 @@ class EvaluationResult(BaseModel):
     verification_result: Optional[Dict[str, Any]] = Field(
         default=None, description="Deterministic programmatic grounding verification metrics"
     )
+    score_normalized: bool = Field(
+        default=False,
+        description="True if any subscore exceeded 25 and had to be rescaled from 0-100 scale",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_and_rescale_subscores(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        normalized = False
+        for field_name in ("groundedness_score", "coverage_score", "distinction_score", "honesty_score"):
+            raw = data.get(field_name)
+            if raw is not None:
+                try:
+                    val = int(raw)
+                    if val > 25:
+                        logger.warning(
+                            "Evaluator subscore '%s' exceeds 25 (received %d). Rescaling from 0-100 to 0-25 scale and setting score_normalized=True.",
+                            field_name, val,
+                        )
+                        data[field_name] = min(25, max(0, round(val * 25 / 100)))
+                        normalized = True
+                except (ValueError, TypeError):
+                    pass
+        if normalized:
+            data["score_normalized"] = True
+        return data
 
 
 class StageTrace(BaseModel):

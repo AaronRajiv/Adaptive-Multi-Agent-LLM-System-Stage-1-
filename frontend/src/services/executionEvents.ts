@@ -38,34 +38,38 @@ export class DemoExecutionEventSource implements ExecutionEventSource {
 
 /** Server-Sent Events source connecting to real backend execution events. */
 export class ServerExecutionEventSource implements ExecutionEventSource {
-  constructor(private runId: string) {}
+  constructor(private runId: string, private afterSeq?: number) {}
 
   subscribe(
     listener: (event: ExecutionEvent) => void,
     onError?: (err: Error) => void
   ): () => void {
-    const url = `${API_BASE_URL}/api/runs/${this.runId}/events`;
+    const query = this.afterSeq !== undefined ? `?after_seq=${this.afterSeq}` : "";
+    const url = `${API_BASE_URL}/api/runs/${this.runId}/events${query}`;
     const eventSource = new EventSource(url);
 
     eventSource.onmessage = (e) => {
       try {
-        const raw: BackendExecutionEvent = JSON.parse(e.data);
+        const raw: any = JSON.parse(e.data);
+        const eventType = raw.type || raw.event_type || "EVENT";
+        const payload = { ...(raw.payload || raw.metadata || {}), seq: raw.seq };
         const event: ExecutionEvent = {
           id: raw.event_id || `${Date.now()}-${Math.random()}`,
-          label: raw.type,
-          message: raw.message || raw.type,
+          label: eventType,
+          message: raw.message || eventType,
           source: "SSE",
           time: raw.timestamp
             ? new Date(raw.timestamp).toLocaleTimeString("en-GB")
             : new Date().toLocaleTimeString("en-GB"),
-          rawType: raw.type,
+          rawType: eventType,
           taskId: raw.task_id,
-          stage: raw.stage,
-          payload: raw.payload,
+          stage: raw.stage || raw.capability,
+          payload: payload,
         };
+        (event as any).seq = raw.seq;
         listener(event);
 
-        if (raw.type === "RUN_COMPLETED" || raw.type === "RUN_FAILED") {
+        if (eventType === "RUN_COMPLETED" || eventType === "RUN_FAILED" || eventType === "RUN_CANCELLED") {
           eventSource.close();
         }
       } catch {
