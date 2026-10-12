@@ -168,7 +168,7 @@ def get_budget_for_strategy(
         return ResourceBudget(
             strategy=strategy,
             max_llm_calls=getattr(settings, "budget_multi_agent_max_llm_calls", 35) if settings else 35,
-            max_tokens=getattr(settings, "budget_multi_agent_max_tokens", 500000) if settings else 500000,
+            max_tokens=getattr(settings, "budget_multi_agent_max_tokens", 1000000) if settings else 1000000,
             max_wall_time_seconds=getattr(settings, "budget_multi_agent_max_wall_time_seconds", 360.0) if settings else 360.0,
             max_web_searches=getattr(settings, "budget_multi_agent_max_web_searches", 8) if settings else 8,
             max_web_fetches=getattr(settings, "budget_multi_agent_max_web_fetches", 8) if settings else 8,

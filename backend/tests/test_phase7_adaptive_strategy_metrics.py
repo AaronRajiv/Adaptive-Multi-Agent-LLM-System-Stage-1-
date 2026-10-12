@@ -142,7 +142,7 @@ def test_resource_budget_defaults_and_settings_overrides():
 
     multi_budget = get_budget_for_strategy(ExecutionStrategy.MULTI_AGENT, settings)
     assert multi_budget.max_llm_calls == 35
-    assert multi_budget.max_tokens == 500000
+    assert multi_budget.max_tokens == 1000000
 
 
 def test_budget_tracker_enforces_max_llm_calls():

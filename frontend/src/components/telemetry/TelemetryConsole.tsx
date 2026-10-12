@@ -304,7 +304,7 @@ export function TelemetryConsole({
                 <div className="p-2 rounded bg-black/40 border border-white/5 space-y-1">
                   <span className="text-neutral-500">TOKEN BUDGET</span>
                   <div className="text-white text-xs font-semibold">
-                    {strategy === "DIRECT" ? "3,000" : strategy === "SINGLE_AGENT" ? "35,000" : strategy === "SINGLE_AGENT_RAG" ? "18,000" : "500,000"}
+                    {strategy === "DIRECT" ? "3,000" : strategy === "SINGLE_AGENT" ? "35,000" : strategy === "SINGLE_AGENT_RAG" ? "18,000" : "1,000,000"}
                   </div>
                 </div>
                 <div className="p-2 rounded bg-black/40 border border-white/5 space-y-1">

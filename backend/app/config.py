@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     budget_single_agent_rag_max_wall_time_seconds: float = Field(default=60.0, ge=0.001, description="Max wall time in seconds for SINGLE_AGENT_RAG strategy")
 
     budget_multi_agent_max_llm_calls: int = Field(default=35, ge=1, description="Max LLM calls for MULTI_AGENT strategy")
-    budget_multi_agent_max_tokens: int = Field(default=500000, ge=1000, description="Max tokens for MULTI_AGENT strategy")
+    budget_multi_agent_max_tokens: int = Field(default=1000000, ge=1000, description="Max tokens for MULTI_AGENT strategy")
     budget_multi_agent_max_wall_time_seconds: float = Field(default=360.0, ge=1.0, description="Max wall time in seconds for MULTI_AGENT strategy")
     budget_multi_agent_max_web_wall_time_seconds: float = Field(default=240.0, ge=1.0, description="Max web operations wall time in seconds for MULTI_AGENT strategy")
     enable_multi_domain_rag_promotion: bool = Field(default=False, description="Whether to promote multi-article or multi-domain document RAG queries to MULTI_AGENT")
