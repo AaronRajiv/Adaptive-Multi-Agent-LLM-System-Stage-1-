@@ -241,6 +241,10 @@ class FetchPageTool(ControlledTool):
 
         extracted_text, title = self._extract_content(bytes(final_content_bytes), content_type, current_url)
 
+        max_chars = getattr(self.cfg, "fetch_page_max_chars", 8000)
+        if len(extracted_text) > max_chars:
+            extracted_text = extracted_text[:max_chars].rstrip() + "\n\n[...content truncated for model rate-limit safety...]"
+
         content_hash = hashlib.sha256(extracted_text.encode("utf-8")).hexdigest()
 
         return FetchPagePayload(

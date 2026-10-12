@@ -77,13 +77,14 @@ class Settings(BaseSettings):
     budget_single_agent_rag_max_wall_time_seconds: float = Field(default=60.0, ge=0.001, description="Max wall time in seconds for SINGLE_AGENT_RAG strategy")
 
     budget_multi_agent_max_llm_calls: int = Field(default=35, ge=1, description="Max LLM calls for MULTI_AGENT strategy")
-    budget_multi_agent_max_tokens: int = Field(default=120000, ge=1000, description="Max tokens for MULTI_AGENT strategy")
-    budget_multi_agent_max_wall_time_seconds: float = Field(default=240.0, ge=1.0, description="Max wall time in seconds for MULTI_AGENT strategy")
+    budget_multi_agent_max_tokens: int = Field(default=500000, ge=1000, description="Max tokens for MULTI_AGENT strategy")
+    budget_multi_agent_max_wall_time_seconds: float = Field(default=360.0, ge=1.0, description="Max wall time in seconds for MULTI_AGENT strategy")
+    budget_multi_agent_max_web_wall_time_seconds: float = Field(default=240.0, ge=1.0, description="Max web operations wall time in seconds for MULTI_AGENT strategy")
     enable_multi_domain_rag_promotion: bool = Field(default=False, description="Whether to promote multi-article or multi-domain document RAG queries to MULTI_AGENT")
 
     # Reliability and Persistence configuration
     max_concurrent_runs: int = Field(default=5, ge=1, le=50, description="Maximum concurrent pipeline execution runs allowed")
-    run_timeout_seconds: float = Field(default=180.0, ge=1.0, description="Global execution timeout in seconds per pipeline run")
+    run_timeout_seconds: float = Field(default=360.0, ge=1.0, description="Global execution timeout in seconds per pipeline run")
     database_url: str = Field(default="", description="Optional PostgreSQL connection URL for runs and metrics persistence")
 
     # Web search and page fetch configuration
@@ -91,6 +92,7 @@ class Settings(BaseSettings):
     web_search_provider: str = Field(default="tavily", description="Web search provider (tavily, mock)")
     web_max_results_default: int = Field(default=5, ge=1, le=20, description="Default max search results")
     fetch_page_max_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, description="Max allowed bytes per fetched page (2MB)")
+    fetch_page_max_chars: int = Field(default=8000, ge=500, description="Max extracted text characters per fetched webpage to stay safely within rate limits")
     fetch_page_timeout_seconds: float = Field(default=10.0, ge=1.0, description="Timeout in seconds for page fetching")
     fetch_page_max_redirects: int = Field(default=5, ge=0, le=10, description="Max allowed redirects")
     fetch_page_user_agent: str = Field(default="AdaptiveAgentBot/1.0 (+http://localhost:8000; web-research)", description="User-Agent header for fetching")

@@ -273,7 +273,15 @@ class GeminiProvider(LLMProvider):
                 if response.status_code in (429, 503):
                     if attempt < max_retries - 1:
                         retry_after = response.headers.get("retry-after")
-                        delay = float(retry_after) if retry_after and retry_after.isdigit() else backoff
+                        delay = float(retry_after) if retry_after and retry_after.replace(".", "", 1).isdigit() else None
+                        if delay is None:
+                            match = re.search(r"retry in ([\d\.]+)s", response.text, re.IGNORECASE)
+                            if match:
+                                try:
+                                    delay = min(float(match.group(1)) + 0.5, 60.0)
+                                except ValueError:
+                                    delay = None
+                        delay = delay if delay is not None else backoff
                         logger.warning(
                             "Gemini API rate-limit or high demand (HTTP %s). Backing off for %.1fs (attempt %d/%d).",
                             response.status_code,
@@ -387,7 +395,15 @@ class GeminiProvider(LLMProvider):
                 if response.status_code in (429, 503):
                     if attempt < max_retries - 1:
                         retry_after = response.headers.get("retry-after")
-                        delay = float(retry_after) if retry_after and retry_after.isdigit() else backoff
+                        delay = float(retry_after) if retry_after and retry_after.replace(".", "", 1).isdigit() else None
+                        if delay is None:
+                            match = re.search(r"retry in ([\d\.]+)s", response.text, re.IGNORECASE)
+                            if match:
+                                try:
+                                    delay = min(float(match.group(1)) + 0.5, 60.0)
+                                except ValueError:
+                                    delay = None
+                        delay = delay if delay is not None else backoff
                         logger.warning(
                             "Gemini API rate-limit or high demand (HTTP %s). Backing off for %.1fs (attempt %d/%d).",
                             response.status_code,
