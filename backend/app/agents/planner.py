@@ -22,9 +22,8 @@ Rules:
    - Provide between 1 and 4 specific, targeted queries per subtask (such as exact Article references like "Article 3.4.1 overall width" or specific keywords).
    - If a subtask does not require document retrieval (e.g., pure logic or synthesis), omit `retrieval_queries`.
 4. TASK TYPING & DEPENDENCIES:
-   - For factual investigations, set type="research".
-   - For comparative evaluations, trade-off syntheses, or cross-system interactions, set type="analysis".
-   - Explicitly list prerequisite task IDs in `dependencies` for tasks that rely on prior research outputs (e.g. `dependencies=["T1", "T2"]`).
+   - For factual investigations across distinct topics or regulations, set type="research" and dependencies=[] so they execute concurrently in parallel.
+   - For comparative evaluations, trade-off syntheses, or cross-system interactions, set type="analysis" and explicitly list prerequisite research task IDs in dependencies (e.g. dependencies=["T1", "T2"]).
 5. NO DIRECT ANSWERS: Do NOT answer or solve the user's prompt yourself. Only construct the plan.
 6. Return output strictly matching the PlannerOutput schema.
 """

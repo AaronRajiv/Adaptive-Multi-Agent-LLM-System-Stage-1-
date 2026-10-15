@@ -7,6 +7,7 @@ Executes user requests using task-appropriate strategies:
 3. MULTI_AGENT: Dynamic task-graph decomposition, parallel execution, RAG grounding, evaluator critique, targeted replanning, and synthesis.
 """
 
+import asyncio
 import hashlib
 import re
 import time
@@ -76,6 +77,8 @@ class OrchestratedPipeline:
         self.settings = settings
         self.document_service = document_service
         self.max_concurrency = max_concurrency
+        if getattr(settings, "llm_provider", None) == "gemini" and self.max_concurrency > 2:
+            self.max_concurrency = 2
         self.event_bus = event_bus
         self.run_id = run_id
 
@@ -829,9 +832,15 @@ class OrchestratedPipeline:
 
         # Stage 8: Targeted Iterative Replanning with Feedback & Query Refinement
         replanning_count = 0
-        max_replans = getattr(self.settings, "max_replanning_rounds", 2)
+        max_replans = getattr(self.settings, "max_replanning_rounds", 1)
 
-        while (evaluation_output.status == "FAIL" or (verifier_result and not verifier_result.passed)) and replanning_count < max_replans:
+        # Replanning is only warranted if the evaluation failed or citation validity fell below threshold
+        needs_replan = (
+            evaluation_output.status == "FAIL"
+            or (verifier_result and verifier_result.citation_validity < float(self.evaluator.pass_threshold))
+        )
+
+        while needs_replan and replanning_count < max_replans:
             replanning_count += 1
             round_start_score = evaluation_output.score or 0
 
@@ -855,7 +864,9 @@ class OrchestratedPipeline:
                     target_tasks.append(r)
 
             if not target_tasks:
-                target_tasks = list(research_results)
+                target_tasks = list(research_results)[:2]
+            else:
+                target_tasks = target_tasks[:2]
 
             replan_msg = (
                 f"Targeted replanning round {replanning_count}/{max_replans} triggered: "
@@ -872,8 +883,8 @@ class OrchestratedPipeline:
             instrumented_llm.set_stage("Replanning")
             t_replan = time.perf_counter()
 
-            # Execute targeted retrieval query refinement and re-run targeted subtasks
-            for r in target_tasks:
+            # Execute targeted retrieval query refinement and re-run targeted subtasks concurrently
+            async def _re_research_single(r: ResearchResult) -> None:
                 task_res = exec_result.task_results.get(r.subtask_id)
                 rc: Optional[RetrievedContext] = None
                 if task_res and task_res.metadata and "retrieved_context" in task_res.metadata:
@@ -1013,6 +1024,8 @@ class OrchestratedPipeline:
                 if re_research.missing_evidence:
                     r.missing_evidence = re_research.missing_evidence
 
+            await asyncio.gather(*[_re_research_single(r) for r in target_tasks])
+
             # Re-run analysis with revised research findings and updated ledger
             analysis_text = await self.analyst.analyze(
                 user_task, research_results, evidence_ledger=evidence_ledger
@@ -1071,7 +1084,10 @@ class OrchestratedPipeline:
             await self._emit(ExecutionEventType.REPLANNING_COMPLETED, message=replan_comp_msg, metadata=replan_comp_meta)
             await self._emit(ExecutionEventType.REPLAN_COMPLETED, message=replan_comp_msg, metadata=replan_comp_meta)
 
-            if evaluation_output.status == "PASS" and (not verifier_result or verifier_result.passed):
+            if evaluation_output.status == "PASS" and (
+                not verifier_result
+                or verifier_result.citation_validity >= float(self.evaluator.pass_threshold)
+            ):
                 break
 
         if getattr(evaluation_output, "score_normalized", False):
@@ -1110,19 +1126,17 @@ class OrchestratedPipeline:
         return response
 
     def _ensure_default_dependencies(self, graph: TaskGraph) -> None:
-        """Sanitize dependencies and ensure DAG graph validity."""
+        """Sanitize dependencies and ensure DAG graph validity with parallel research execution."""
         all_ids = {t.id for t in graph.tasks}
-        for task in graph.tasks:
-            task.dependencies = [d for d in task.dependencies if d != task.id and d in all_ids]
-
-        try:
-            graph.validate_graph()
-        except ValueError:
-            for task in graph.tasks:
-                if task.type == TaskType.RESEARCH:
-                    task.dependencies = []
-
         research_ids = [t.id for t in graph.tasks if t.type == TaskType.RESEARCH]
+
+        for task in graph.tasks:
+            # Filter invalid or self references
+            task.dependencies = [d for d in task.dependencies if d != task.id and d in all_ids]
+            # Research subtasks explore distinct domains and must execute concurrently in parallel
+            if task.type == TaskType.RESEARCH:
+                task.dependencies = []
+
         if research_ids:
             for task in graph.tasks:
                 if task.type == TaskType.ANALYSIS and not task.dependencies:
@@ -1132,7 +1146,10 @@ class OrchestratedPipeline:
             graph.validate_graph()
         except ValueError:
             for task in graph.tasks:
-                task.dependencies = []
+                if task.type == TaskType.RESEARCH:
+                    task.dependencies = []
+                elif task.type == TaskType.ANALYSIS:
+                    task.dependencies = list(research_ids)
             graph.validate_graph()
 
     async def _emit(

@@ -88,10 +88,11 @@ class ResearchTaskAgent(TaskExecutionAgent):
         user_task = str(context.input_context.get("user_task", context.task.description))
 
         task_meta = context.task.metadata or {}
+        has_doc_evidence = bool(context.retrieved_context and context.retrieved_context.chunks)
         needs_web = bool(
             task_meta.get("needs_web")
             or task_meta.get("web_search_query")
-            or context.input_context.get("needs_web")
+            or (context.input_context.get("needs_web") and not has_doc_evidence)
             or context.task.assigned_capability == "web_research"
         )
 
@@ -135,12 +136,12 @@ class ResearchTaskAgent(TaskExecutionAgent):
                             )
                         )
                     fetched_urls = []
-                    # Fetch top pages if fetch_page_tool is available
+                    # Fetch top pages if fetch_page_tool is available (cap at 2 to stay within budget)
                     if self.fetch_page_tool and results:
                         import urllib.parse
                         from time import perf_counter
 
-                        for hit in results[:3]:
+                        for hit in results[:2]:
                             hit_url = hit.get("url")
                             hit_title = hit.get("title", "")
                             if hit_url:

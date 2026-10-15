@@ -34,6 +34,14 @@ class Settings(BaseSettings):
         default="gemini-3.1-flash-lite",
         description="Model name to be used by the active provider"
     )
+    nvidia_api_key: str = Field(
+        default="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",
+        description="API key for NVIDIA NIM API"
+    )
+    nvidia_base_url: str = Field(
+        default="https://integrate.api.nvidia.com/v1",
+        description="Base URL for NVIDIA NIM OpenAI-compatible API"
+    )
 
     # Knowledge and retrieval configuration
     embedding_provider: str = Field(default="gemini", description="Embedding provider identifier (gemini or mock)")
@@ -57,7 +65,7 @@ class Settings(BaseSettings):
         description="Minimum score (0-100) required for the Evaluator to award PASS status"
     )
     max_replanning_rounds: int = Field(
-        default=2,
+        default=1,
         ge=0,
         le=5,
         description="Maximum number of targeted replanning rounds if evaluation or verification fails"
@@ -78,13 +86,13 @@ class Settings(BaseSettings):
 
     budget_multi_agent_max_llm_calls: int = Field(default=35, ge=1, description="Max LLM calls for MULTI_AGENT strategy")
     budget_multi_agent_max_tokens: int = Field(default=1000000, ge=1000, description="Max tokens for MULTI_AGENT strategy")
-    budget_multi_agent_max_wall_time_seconds: float = Field(default=360.0, ge=1.0, description="Max wall time in seconds for MULTI_AGENT strategy")
-    budget_multi_agent_max_web_wall_time_seconds: float = Field(default=240.0, ge=1.0, description="Max web operations wall time in seconds for MULTI_AGENT strategy")
+    budget_multi_agent_max_wall_time_seconds: float = Field(default=600.0, ge=1.0, description="Max wall time in seconds for MULTI_AGENT strategy")
+    budget_multi_agent_max_web_wall_time_seconds: float = Field(default=600.0, ge=1.0, description="Max web operations wall time in seconds for MULTI_AGENT strategy")
     enable_multi_domain_rag_promotion: bool = Field(default=False, description="Whether to promote multi-article or multi-domain document RAG queries to MULTI_AGENT")
 
     # Reliability and Persistence configuration
     max_concurrent_runs: int = Field(default=5, ge=1, le=50, description="Maximum concurrent pipeline execution runs allowed")
-    run_timeout_seconds: float = Field(default=360.0, ge=1.0, description="Global execution timeout in seconds per pipeline run")
+    run_timeout_seconds: float = Field(default=600.0, ge=1.0, description="Global execution timeout in seconds per pipeline run")
     database_url: str = Field(default="", description="Optional PostgreSQL connection URL for runs and metrics persistence")
 
     # Web search and page fetch configuration
@@ -127,7 +135,9 @@ class Settings(BaseSettings):
         """Check whether the necessary API key has been supplied."""
         if self.llm_provider.lower() == "mock":
             return True
-        return bool(self.llm_api_key and self.llm_api_key.strip())
+        if self.llm_provider.lower() == "nvidia":
+            return bool((self.nvidia_api_key and self.nvidia_api_key.strip()) or (self.llm_api_key and self.llm_api_key.strip()))
+        return bool(self.llm_api_key and self.llm_api_key.strip()) or bool(self.nvidia_api_key and self.nvidia_api_key.strip())
 
 
 # Global settings singleton

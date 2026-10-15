@@ -388,3 +388,25 @@ async def test_document_only_run_never_triggers_web_calls(tmp_path):
     assert pipeline.fetch_page_tool.execute.call_count == 0
 
 
+@pytest.mark.asyncio
+async def test_strategy_selector_document_priority_over_web():
+    """Verify that when documents are attached, needs_web is False unless explicitly asked."""
+    selector = StrategySelector(None)
+
+    # 1. Attached document query mentioning trends/2024 -> needs_web must be False
+    dec_doc = await selector.select_strategy(
+        "Compare electric and petrol vehicles across lifecycle emissions, cost, and adoption trends in 2024",
+        has_documents=True,
+    )
+    assert dec_doc.needs_web is False
+    assert dec_doc.requires_rag is True
+
+    # 2. Attached document query explicitly requesting web search -> needs_web is True
+    dec_web = await selector.select_strategy(
+        "Compare electric and petrol vehicles based on the PDF and search the web for recent news",
+        has_documents=True,
+    )
+    assert dec_web.needs_web is True
+
+
+

@@ -6,6 +6,8 @@ import type {
   DocumentMetadata,
   DocumentUploadResponse,
   ChatMessagePayload,
+  ModelInfo,
+  ModelListResponse,
 } from "../types/api";
 
 export const API_BASE_URL = import.meta.env["VITE_API_BASE_URL"] || "http://localhost:8000";
@@ -64,6 +66,26 @@ export async function fetchSystemStatus(): Promise<SystemStatusResponse> {
       model: "unknown",
       evaluator_threshold: 80,
       message: error instanceof Error ? error.message : "Backend unavailable",
+    };
+  }
+}
+
+export async function fetchModels(): Promise<ModelListResponse> {
+  try {
+    return (await request("/api/models", undefined, 8000)) as ModelListResponse;
+  } catch {
+    return {
+      models: [
+        {
+          id: "nvidia/nemotron-3-super-120b-a12b",
+          name: "Nemotron 3 Super 120B",
+          provider: "nvidia",
+          description: "Flagship NVIDIA MoE reasoning & research model",
+          context_window: 131072,
+          is_default: true,
+        },
+      ],
+      default_model: "nvidia/nemotron-3-super-120b-a12b",
     };
   }
 }
@@ -163,7 +185,8 @@ export async function executePipeline(
   documents?: DocumentPayload[],
   history?: ChatMessagePayload[],
   documentIds?: string[],
-  asyncRun = true
+  asyncRun = true,
+  model?: string
 ): Promise<RunResponse> {
   const payload = {
     task,
@@ -172,6 +195,7 @@ export async function executePipeline(
     ...(documentIds && documentIds.length > 0 ? { document_ids: documentIds } : {}),
     ...(documents && documents.length > 0 ? { documents } : {}),
     ...(history && history.length > 0 ? { history } : {}),
+    ...(model ? { model } : {}),
   };
 
   if (!asyncRun) {
@@ -197,7 +221,7 @@ export async function executePipeline(
 
   // 2. Poll GET /api/runs/{run_id} until completed
   const pollInterval = 1000;
-  const maxAttempts = 300;
+  const maxAttempts = 720;
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise((resolve) => setTimeout(resolve, pollInterval));
     try {
@@ -227,7 +251,7 @@ export async function executePipeline(
   }
 
   throw new ApiError(
-    "Pipeline execution polling timed out after 300 seconds.",
+    "Pipeline execution polling timed out after 720 seconds.",
     408,
     "Timeout"
   );

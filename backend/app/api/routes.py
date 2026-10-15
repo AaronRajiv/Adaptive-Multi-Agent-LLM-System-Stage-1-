@@ -29,10 +29,12 @@ from app.llm.base import (
     LLMProviderError,
     LLMStructuredOutputError,
 )
-from app.llm.provider import get_llm_provider
+from app.llm.provider import get_llm_provider, get_llm_provider_for_model, SUPPORTED_MODELS
 from app.logging_config import get_logger
 from app.models.schemas import (
     AsyncRunResponse,
+    ModelInfo,
+    ModelListResponse,
     RunRequest,
     RunResponse,
     SystemStatusResponse,
@@ -106,6 +108,16 @@ async def get_system_status() -> SystemStatusResponse:
         model=settings.llm_model,
         evaluator_threshold=settings.evaluator_pass_threshold,
         message=msg,
+        available_models=[m["id"] for m in SUPPORTED_MODELS],
+    )
+
+
+@router.get("/models", response_model=ModelListResponse)
+async def list_available_models() -> ModelListResponse:
+    """Retrieve catalog of available LLM models across NVIDIA, Gemini, and Mock providers."""
+    return ModelListResponse(
+        models=[ModelInfo(**m) for m in SUPPORTED_MODELS],
+        default_model="nvidia/nemotron-3-super-120b-a12b",
     )
 
 
@@ -356,19 +368,20 @@ async def run_pipeline(request: RunRequest):
 
     # Initialize LLM Provider with clear configuration error handling
     try:
-        provider = get_llm_provider(settings)
+        target_model = request.model or settings.llm_model
+        provider = get_llm_provider_for_model(target_model, settings)
     except LLMConfigurationError as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
                 "error_type": "ConfigurationError",
                 "message": str(e),
-                "hint": "Set LLM_API_KEY in backend/.env or set LLM_PROVIDER=mock for testing.",
+                "hint": "Set NVIDIA_API_KEY or LLM_API_KEY in backend/.env or set LLM_PROVIDER=mock for testing.",
             },
         )
 
     run_id = request.run_id or str(uuid.uuid4())
-    logger.info("Starting pipeline execution for run_id=%s, task='%s'", run_id, task_text[:100])
+    logger.info("Starting pipeline execution for run_id=%s, model=%s, task='%s'", run_id, target_model, task_text[:100])
     event_bus = await event_bus_registry.get_or_create(run_id)
 
     pipeline = OrchestratedPipeline(

@@ -177,6 +177,10 @@ class RunRequest(BaseModel):
         default=None,
         description="Optional conversation history turns for multi-turn chat context"
     )
+    model: Optional[str] = Field(
+        default=None,
+        description="Optional model identifier override (e.g. 'nvidia/nemotron-3-super-120b-a12b', 'gemini-3.1-flash-lite')"
+    )
 
 
 class AsyncRunResponse(BaseModel):
@@ -219,3 +223,22 @@ class SystemStatusResponse(BaseModel):
     model: str = Field(..., description="Configured LLM model name")
     evaluator_threshold: int = Field(..., description="Evaluator pass threshold")
     message: str = Field(..., description="Human-readable status summary")
+    available_models: List[str] = Field(default_factory=list, description="List of supported model identifiers")
+
+
+class ModelInfo(BaseModel):
+    """Metadata describing an available LLM model."""
+
+    id: str = Field(..., description="Unique model identifier")
+    name: str = Field(..., description="User-facing display name")
+    provider: str = Field(..., description="Provider name (nvidia, gemini, mock)")
+    description: Optional[str] = Field(default=None, description="Brief description")
+    recommended: bool = Field(default=False, description="Whether recommended by default")
+    badge: Optional[str] = Field(default=None, description="Short tag or badge text")
+
+
+class ModelListResponse(BaseModel):
+    """Response returned by GET /api/models listing all available models."""
+
+    models: List[ModelInfo] = Field(..., description="List of available models")
+    default_model: str = Field(..., description="Default model ID")

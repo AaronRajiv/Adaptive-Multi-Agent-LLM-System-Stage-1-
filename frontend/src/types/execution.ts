@@ -117,4 +117,5 @@ export interface ChatMessage {
   runId?: string | undefined;
   statusMessage?: string | undefined;
   validCitations?: string[] | undefined;
+  modelName?: string | undefined;
 }

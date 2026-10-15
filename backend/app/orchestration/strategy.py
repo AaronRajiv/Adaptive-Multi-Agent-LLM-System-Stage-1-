@@ -93,13 +93,15 @@ Evaluate the request across 5 explicit criteria:
 4. Need for Cross-Document Reasoning:
    - Comparing multiple documents, regulations, or distinct sections -> cross_document_reasoning=true -> MULTI_AGENT.
 5. Need for Live Web Search (needs_web):
-   - Set needs_web=true if:
-     * The task asks for current, recent, or real-time information (e.g. 2024-2026 regulations, news, updates, market prices, technical trends, external facts, announcements).
-     * The user explicitly mentions searching the web, online sources, google, or checking external references.
-     * No attached documents are present, and the question is an empirical or factual real-world inquiry requiring external evidence rather than purely self-contained programming/math or pleasantries.
-   - Set needs_web=false if:
-     * The task is strictly asking about the contents of an attached document or uploaded file (e.g. "according to the uploaded PDF", "in Article 4.1 of the regulations").
-     * The task is a conversational greeting, pleasantry, mathematical calculation, algorithm/coding puzzle, or generic definition that does not require live web data.
+   - When attached documents ARE present (Attached Documents Present: True):
+     * Set needs_web=false by default! The attached documents are the primary ground truth.
+     * Set needs_web=true ONLY if the user explicitly requests web searching (e.g., 'search the web', 'look online', 'google', 'check web sources').
+   - When NO attached documents are present (Attached Documents Present: False):
+     * Set needs_web=true if:
+       - The task asks for current, recent, or real-time information (e.g. 2024-2026 regulations, news, updates, market prices, technical trends, external facts, announcements).
+       - The user explicitly mentions searching the web, online sources, google, or checking external references.
+       - The question is an empirical or factual real-world inquiry requiring external evidence rather than purely self-contained programming/math or pleasantries.
+     * Set needs_web=false for conversational greetings, pleasantries, mathematical calculations, algorithms, or generic definitions.
    - Always provide web_rationale justifying the needs_web decision.
 
 Execution Strategies:
@@ -179,7 +181,16 @@ class StrategySelector:
         has_cross_doc_cue = bool(
             re.search(r"\b(cross-reference|compare documents|between articles|across sections|multiple regulations|trade-off|tradeoff)\b", cleaned)
         )
-        has_web_cue = any(kw in cleaned for kw in self.WEB_CUE_KEYWORDS)
+        EXPLICIT_WEB_KEYWORDS = [
+            "search the web", "web search", "search google", "search online",
+            "look online", "google it", "check online", "search internet",
+            "search the internet", "google", "online sources"
+        ]
+        user_wants_web = any(kw in cleaned for kw in EXPLICIT_WEB_KEYWORDS)
+        if has_documents:
+            has_web_cue = user_wants_web
+        else:
+            has_web_cue = any(kw in cleaned for kw in self.WEB_CUE_KEYWORDS)
 
         # -------------------------------------------------------------
         # 3. Primary Classifier: Structured LLM Call
@@ -214,10 +225,15 @@ class StrategySelector:
                         decision.strategy = ExecutionStrategy.MULTI_AGENT
                         decision.cross_document_reasoning = True
                         decision.reasoning += f" (Promoted to MULTI_AGENT: covers {article_count} distinct articles / {len(detected_domains)} domains)."
-                # If explicit web search is requested, ensure needs_web is honored
-                if not decision.needs_web and any(kw in cleaned for kw in ["search the web", "web search", "search google", "search online", "look online", "google it"]):
+                
+                # When documents are present, prioritize document RAG unless user explicitly requested web search
+                if has_documents and decision.needs_web and not user_wants_web:
+                    decision.needs_web = False
+                    decision.web_rationale = "Attached documents are present; prioritizing document RAG over web search unless explicitly requested."
+                elif not decision.needs_web and user_wants_web:
                     decision.needs_web = True
                     decision.web_rationale = decision.web_rationale or "Explicit web search requested in user query."
+
                 logger.info(
                     "StrategySelector decision: strategy=%s, needs_web=%s, reasoning=%s, web_rationale=%s",
                     decision.strategy.value, decision.needs_web, decision.reasoning, decision.web_rationale

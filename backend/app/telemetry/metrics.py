@@ -26,10 +26,15 @@ MODEL_PRICING = {
     "gemini-3.1-flash-lite": {"prompt_per_m": 0.075, "completion_per_m": 0.30},
     "gemini-1.5-flash": {"prompt_per_m": 0.075, "completion_per_m": 0.30},
     "gemini-1.5-pro": {"prompt_per_m": 1.25, "completion_per_m": 5.00},
+    # NVIDIA Models
+    "nvidia/nemotron-3-super-120b-a12b": {"prompt_per_m": 0.80, "completion_per_m": 0.80},
+    "nvidia/llama-3.1-nemotron-70b-instruct": {"prompt_per_m": 0.35, "completion_per_m": 0.40},
+    "meta/llama-3.3-70b-instruct": {"prompt_per_m": 0.35, "completion_per_m": 0.40},
     # Embedding model
     "gemini-embedding-001": {"prompt_per_m": 0.02, "completion_per_m": 0.0},
     # Mock / testing default
     "mock": {"prompt_per_m": 0.001, "completion_per_m": 0.002},
+    "mock-model": {"prompt_per_m": 0.001, "completion_per_m": 0.002},
 }
 
 

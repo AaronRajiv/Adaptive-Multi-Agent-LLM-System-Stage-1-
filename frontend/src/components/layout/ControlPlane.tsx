@@ -15,6 +15,7 @@ import {
   fetchDocumentStatus,
   cancelRun,
   fetchRun,
+  fetchModels,
 } from "@/services/api";
 import { ServerExecutionEventSource } from "@/services/executionEvents";
 import { processExecutionEvent, type LiveExecutionState } from "@/services/executionState";
@@ -89,6 +90,31 @@ export function ControlPlane() {
   });
 
   const recent = useQuery({ queryKey: ["recent-runs"], queryFn: fetchRecentRuns, retry: false });
+
+  const modelsQuery = useQuery({
+    queryKey: ["available-models"],
+    queryFn: fetchModels,
+    refetchInterval: 60000,
+    retry: false,
+  });
+
+  const [selectedModel, setSelectedModel] = useState<string>(() => {
+    try {
+      return (
+        localStorage.getItem("selected_llm_model") ||
+        "nvidia/nemotron-3-super-120b-a12b"
+      );
+    } catch {
+      return "nvidia/nemotron-3-super-120b-a12b";
+    }
+  });
+
+  const handleSelectModel = (modelId: string) => {
+    setSelectedModel(modelId);
+    try {
+      localStorage.setItem("selected_llm_model", modelId);
+    } catch {}
+  };
 
   useEffect(() => {
     mounted.current = true;
@@ -180,6 +206,10 @@ export function ControlPlane() {
         files: files ? [...files] : undefined,
       };
 
+      const modelDisplayName =
+        modelsQuery.data?.models.find((m) => m.id === selectedModel)?.name ||
+        selectedModel;
+
       const assistantMsg: ChatMessage = {
         id: assistantMsgId,
         role: "assistant",
@@ -187,6 +217,7 @@ export function ControlPlane() {
         events: [initialClientEv],
         running: true,
         runId,
+        modelName: modelDisplayName,
       };
 
       setMessages((prev) => [...prev, userMsg, assistantMsg]);
@@ -310,7 +341,9 @@ export function ControlPlane() {
           runId,
           undefined,
           historyPayload,
-          allDocIds.length > 0 ? allDocIds : undefined
+          allDocIds.length > 0 ? allDocIds : undefined,
+          true,
+          selectedModel
         );
         if (!mounted.current || id !== requestId.current) return;
 
@@ -345,6 +378,7 @@ export function ControlPlane() {
                   runId: model.runId,
                   validCitations: model.verification?.validCitations,
                   statusMessage: undefined,
+                  modelName: modelDisplayName,
                 }
               : msg
           )
@@ -353,23 +387,25 @@ export function ControlPlane() {
         recent.refetch();
       } catch (err) {
         if (!mounted.current || id !== requestId.current) return;
-        // Honest recovery: transition to "lost connection, checking run status" and poll run status
+        // Honest recovery: transition to "Execution in progress, synchronizing..." and poll run status
         setMessages((prev) =>
           prev.map((msg) =>
             msg.id === assistantMsgId
-              ? { ...msg, statusMessage: "lost connection, checking run status...", running: true }
+              ? { ...msg, statusMessage: "Execution in progress, synchronizing...", running: true }
               : msg
           )
         );
 
         let recovered = false;
+        let consecutiveErrors = 0;
         try {
           // Poll GET /api/runs/{runId} to inspect backend state honestly
-          for (let poll = 0; poll < 60; poll++) {
-            await new Promise((r) => setTimeout(r, 1500));
+          for (let poll = 0; poll < 360; poll++) {
+            await new Promise((r) => setTimeout(r, 2000));
             if (!mounted.current || id !== requestId.current) return;
             const check = await fetchRun(runId).catch(() => null);
             if (check) {
+              consecutiveErrors = 0;
               if (check.status === "completed" && check.result) {
                 const model = adaptRun(check.result);
                 setRun(model);
@@ -411,6 +447,20 @@ export function ControlPlane() {
                   )
                 );
                 recovered = true;
+                break;
+              } else if (check.status === "running") {
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantMsgId
+                      ? { ...msg, statusMessage: "Execution in progress on server...", running: true }
+                      : msg
+                  )
+                );
+              }
+            } else {
+              consecutiveErrors++;
+              if (consecutiveErrors >= 20) {
+                // Backend unreachable for 40 consecutive seconds
                 break;
               }
             }
@@ -515,6 +565,9 @@ export function ControlPlane() {
           presets={PRESETS}
           onCancel={handleCancel}
           onOpenEvidence={() => setTelemetryTab("evidence")}
+          models={modelsQuery.data?.models || []}
+          selectedModel={selectedModel}
+          onSelectModel={handleSelectModel}
         />
       </div>
 

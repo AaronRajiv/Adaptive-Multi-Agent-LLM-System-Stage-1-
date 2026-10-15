@@ -19,7 +19,9 @@ import { Button } from "@/components/ui/button";
 import { TypewriterMarkdown } from "@/components/chat/TypewriterMarkdown";
 import { ResearchActivityFeed } from "@/components/chat/ResearchActivityFeed";
 import { EvidencePassageModal } from "@/components/chat/EvidencePassageModal";
+import { ModelSelector } from "@/components/chat/ModelSelector";
 import type { ChatMessage } from "@/types/execution";
+import type { ModelInfo } from "@/types/api";
 
 interface Props {
   messages: ChatMessage[];
@@ -31,6 +33,9 @@ interface Props {
   presets: { label: string; task: string }[];
   onCancel?: () => void;
   onOpenEvidence?: () => void;
+  models?: ModelInfo[];
+  selectedModel?: string;
+  onSelectModel?: (modelId: string) => void;
 }
 
 export function ChatPanel({
@@ -42,6 +47,9 @@ export function ChatPanel({
   presets,
   onCancel,
   onOpenEvidence,
+  models = [],
+  selectedModel = "nvidia/nemotron-3-super-120b-a12b",
+  onSelectModel,
 }: Props) {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [inspectCitation, setInspectCitation] = useState<{ runId?: string; citation: string } | null>(null);
@@ -79,6 +87,38 @@ export function ChatPanel({
 
   return (
     <div className="flex flex-col h-full bg-black text-neutral-200">
+      {/* Top Header Bar with Model Selector */}
+      <div className="px-4 py-2 border-b border-white/10 bg-neutral-950/80 backdrop-blur flex items-center justify-between flex-shrink-0 z-20">
+        <div className="flex items-center gap-2">
+          {models.length > 0 && onSelectModel ? (
+            <ModelSelector
+              models={models}
+              selectedModelId={selectedModel}
+              onSelectModel={onSelectModel}
+              disabled={running}
+              direction="down"
+            />
+          ) : (
+            <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-white/5 border border-white/10 text-xs text-neutral-300">
+              <Sparkles size={13} className="text-emerald-400" />
+              <span>NVIDIA Nemotron 3</span>
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-2 text-xs text-neutral-400">
+          {running ? (
+            <span className="inline-flex items-center gap-1.5 text-amber-400 font-mono text-[11px]">
+              <LoaderCircle size={12} className="animate-spin" />
+              Executing pipeline...
+            </span>
+          ) : (
+            <span className="text-[10px] font-mono text-neutral-400">
+              Pipeline Ready
+            </span>
+          )}
+        </div>
+      </div>
+
       {/* Scrollable Messages Feed */}
       <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
         {/* Welcome Screen */}
@@ -213,6 +253,11 @@ export function ChatPanel({
                             ? "RAG GROUNDED"
                             : "MULTI-AGENT SYNTHESIS"}
                         </span>
+                        {msg.modelName && (
+                          <span className="hidden sm:inline-flex px-1.5 py-0.5 rounded text-[9px] font-mono bg-white/5 border border-white/10 text-neutral-300">
+                            {msg.modelName}
+                          </span>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-2">
@@ -265,27 +310,45 @@ export function ChatPanel({
 
       {/* Input Command Area */}
       <form className="p-3.5 border-t border-white/10 bg-neutral-950/90" onSubmit={handleSubmitForm}>
-        {/* Attached Files Chips */}
-        {attachedFiles.length > 0 && (
-          <div className="flex flex-wrap gap-2 max-w-3xl mx-auto mb-2 px-1">
-            {attachedFiles.map((file, idx) => (
-              <span
-                key={idx}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-neutral-900 border border-white/10 text-[11px] text-neutral-200 font-mono"
-              >
-                <Paperclip size={12} className="text-emerald-400" />
-                <span className="truncate max-w-[140px]">{file.name}</span>
-                <button
-                  type="button"
-                  onClick={() => removeFile(idx)}
-                  className="text-neutral-500 hover:text-red-400 p-0.5"
+        {/* Model Selector & Attached Files Row */}
+        <div className="flex items-center justify-between max-w-3xl mx-auto mb-2 px-1 gap-2 flex-wrap">
+          {models.length > 0 && onSelectModel ? (
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] uppercase font-mono text-neutral-400">Model:</span>
+              <ModelSelector
+                models={models}
+                selectedModelId={selectedModel}
+                onSelectModel={onSelectModel}
+                disabled={running}
+                direction="up"
+                compact
+              />
+            </div>
+          ) : (
+            <div />
+          )}
+
+          {attachedFiles.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {attachedFiles.map((file, idx) => (
+                <span
+                  key={idx}
+                  className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-neutral-900 border border-white/10 text-[11px] text-neutral-200 font-mono"
                 >
-                  <X size={12} />
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
+                  <Paperclip size={12} className="text-emerald-400" />
+                  <span className="truncate max-w-[140px]">{file.name}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeFile(idx)}
+                    className="text-neutral-500 hover:text-red-400 p-0.5"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
 
         {/* Hidden File Picker Input */}
         <input

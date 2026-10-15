@@ -137,6 +137,14 @@ class GroundingVerifier:
         doc_matches = cls.CITATION_REGEX.findall(text_without_web)
         doc_citations = [f"[{raw}]" for raw in doc_matches]
 
+        # Also collect citations matching any document citations in evidence ledger
+        if evidence_ledger:
+            for item in evidence_ledger.items.values():
+                if item.source_type == "document" and item.citation:
+                    clean_c = item.citation.strip()
+                    if clean_c and clean_c.lower() in text.lower() and clean_c not in doc_citations:
+                        doc_citations.append(clean_c)
+
         total_citations = len(web_citations) + len(doc_citations)
 
         if total_citations == 0:

@@ -81,6 +81,22 @@ export interface SystemStatusResponse {
   message: string;
 }
 
+export interface ModelInfo {
+  id: string;
+  name: string;
+  provider: string;
+  description: string;
+  recommended?: boolean;
+  badge?: string;
+  context_window?: number;
+  is_default?: boolean;
+}
+
+export interface ModelListResponse {
+  models: ModelInfo[];
+  default_model: string;
+}
+
 export interface ApiErrorDetail {
   error_type?: string;
   message?: string;
